@@ -89,7 +89,7 @@ int main(void) {
             "void BPF_STRUCT_OPS(scx_fresh_dispatch,", 1)[0]
         self.assertIn("u64 slice = enqueue_slice_ns(h);", body)
         calls = re.findall(r"\bscx_insert(?:_vtime)?\(p, [^,]+, (slice|enqueue_slice_ns\(h\))[,)]", body)
-        self.assertEqual(len(calls), 7)
+        self.assertEqual(len(calls), 5)
         self.assertEqual(calls.count("enqueue_slice_ns(h)"), 1)  # No-state fallback.
         self.assertEqual(len(re.findall(r"\bscx_insert(?:_vtime)?\(", body)), len(calls))
 
@@ -103,16 +103,16 @@ int main(void) {
         helper = source.split("static __always_inline void trace_urgent_enqueue(", 1)[1].split(
             "/* -----------------------------\n * sched_ext ops", 1)[0]
         self.assertEqual(helper.count("trace_stage_enqueue(p, st, flags, dsq);"), 1)
-        self.assertEqual(enqueue.count("trace_urgent_enqueue(p, st,"), 7)
+        self.assertEqual(enqueue.count("trace_urgent_enqueue(p, st,"), 5)
         self.assertEqual(enqueue.count("scx_insert(p,"), 1)
-        self.assertEqual(enqueue.count("scx_insert_vtime(p,"), 6)
+        self.assertEqual(enqueue.count("scx_insert_vtime(p,"), 4)
         self.assertIn("if (!trace_stage_enqueues)\n        return;", source)
 
-    def test_deadline_grace_is_runtime_selected_without_overflow(self):
+    def test_age_demotion_queue_and_flag_are_absent(self):
         source = SOURCE.read_text()
-        self.assertIn("const volatile __u64 deadline_grace_ns = 1000000ULL;", source)
-        self.assertIn("now_ns > h->deadline_ts_ns &&\n        now_ns - h->deadline_ts_ns > deadline_grace_ns", source)
-        self.assertNotIn("now_ns > h->deadline_ts_ns +", source)
+        self.assertNotIn("DSQ_STALE", source)
+        self.assertNotIn("deadline_grace_ns", source)
+        self.assertNotIn("FRESH_HINT_EXECUTOR_OWNED", source)
 
 
 if __name__ == "__main__":

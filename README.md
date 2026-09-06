@@ -4,12 +4,13 @@ A sched_ext scheduler for application-selected jobs, with explicit service
 classes and per-job timing hints.
 
 Applications select Urgent, Deadline or Background service explicitly. Stage
-identity is diagnostic and never selects a queue. The version 2 hint ABI requires
+identity is diagnostic and never selects a queue. The version 3 hint ABI requires
 clients and scheduler to be rebuilt together; it does not interpret old
-stage-based hints as service requests.
+older-version hints as service requests.
 
-Same-class deadline preemption, application-only expiry and replenished service allocations
-remain design work, not implemented guarantees.
+Expiry and cancellation belong to the application; elapsed time bounds never
+demote a worker. Same-class deadline preemption and replenished service
+allocations remain design work, not implemented guarantees.
 
 ## Build and test
 

@@ -22,9 +22,9 @@ Declarations are in `src/freshqos.h`; the shared layout is
 | `freshqos_publish_job(...)` / `freshqos_publish_job_for(...)` | Build and publish a hint from individual fields. |
 | `freshqos_clear_hint(q)` | Write an unspecified-stage Background hint with job ID zero for the current thread. |
 
-Use the full hint structure when setting flags such as
-`FRESH_HINT_EXECUTOR_OWNED`. A clear is a map update, not an ownership or
-cancellation operation; an executor must establish that clearing is safe.
+A clear is a map update, not an ownership or cancellation operation; an executor
+must establish that clearing is safe. Ownership is a runtime invariant, not a
+request for exemption from a kernel expiry rule.
 
 ## Fields
 
@@ -33,11 +33,11 @@ cancellation operation; an executor must establish that clearing is safe.
 | `api_version` | Set to `FRESH_API_VERSION`. |
 | `stage_id` | Application-defined diagnostic identity; never selects service. |
 | `class_id` | `FRESH_CLASS_BACKGROUND`, `FRESH_CLASS_DEADLINE` or `FRESH_CLASS_URGENT`. |
-| `flags` | Ownership flags; zero unless the client implements their contract. |
+| `flags` | Reserved; publish zero. |
 | `job_id` | Stable for one job; change it when selecting new work. |
 | `release_ts_ns` | Monotonic release time. |
 | `deadline_ts_ns` | Absolute monotonic deadline, or zero for none. |
-| `stale_ns` | Maxurgentm useful age, or zero to disable the stale threshold. |
+| `stale_ns` | Optional relative ordering bound added to release time; zero disables it. It does not authorize dropping or demotion. |
 | `budget_ns` | Execution budget, or zero to disable budget enforcement. |
 | `slice_ns` | Requested insertion slice; zero selects the scheduler default. |
 | `weight` | Reserved fairness parameter; current BPF runtime accounting does not apply it. |
@@ -79,16 +79,16 @@ Mid-job migration requires state keyed by at least stage and job identity.
 
 ### Retaining ownership through completion
 
-`FRESH_HINT_EXECUTOR_OWNED` prevents age demotion for a selected non-urgent
-owner. The client must reject expired work before execution and preserve
-ownership through its completion path. Budget demotion still applies.
-A completed hint may remain through parking until the dispatcher establishes
-completion and replaces it with the next job. Clearing the slot into Background too
-early can delay the completion tail under contention.
+The application decides whether a selected job is useful, including after its
+deadline. It may reject work before callback entry or let late work finish.
+BPF does not change class because a time bound elapsed, and no ownership flag
+is needed to retain service through a late completion tail. Budget demotion
+still applies and can delay progress; this change is not a service reservation.
 
-The scheduler's default deadline grace is 1 ms. A client may enforce a stricter
-admission deadline without that grace. The flag does not cancel work, disable
-budget accounting, or authorize kernel-side selection.
+A completed hint may remain through parking until the dispatcher establishes
+completion and replaces it with the next job. Clearing the slot into Background
+too early can still delay the completion tail under contention. The single-slot
+publication and replacement rules apply regardless of expiry policy.
 
 ## Client boundary
 
@@ -98,8 +98,9 @@ The helper sets the ABI version when constructing a job, but does not negotiate
 versions or validate application deadlines. Full-structure publication leaves
 field initialization to the caller.
 
-ABI version 2 replaces stage-based routing with explicit service classes.
-Clients and scheduler must be rebuilt together. Version 1 hints and unknown
+ABI version 3 makes expiry application-owned and removes the executor-owned
+flag. The layout is unchanged, but the service semantics differ from version 2.
+Clients and scheduler must be rebuilt together. Older-version hints and unknown
 classes are treated as unhinted Background work; stage zero has no special
 meaning. The client rejects incompatible versions and unknown classes before
 updating the map. See the [scheduler rules](SCHEDULER.md) for service treatment.

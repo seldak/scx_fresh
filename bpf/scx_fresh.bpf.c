@@ -7,7 +7,7 @@
  *   never stale-demote / late-demote. Periodic tasks may "arm" hints with future
  *   release_ts_ns; all age math guards against underflow.
  * - Deadline: EDF-like ordering using DSQ vtime = effective deadline
- * - Stale work: demoted to DSQ_STALE
+ * - Expiry and cancellation belong to the application
  * - Budget overrun: Deadline task demoted to Background for remainder of job
  * - Background: vtime fairness using vruntime
  */
@@ -128,12 +128,7 @@ static __always_inline bool scx_move_to_local(u64 dsq_id)
 #define DSQ_URGENT    0x1A01ULL
 #define DSQ_DEADLINE     0xFE01ULL
 #define DSQ_BACKGROUND     0xBE01ULL
-#define DSQ_STALE  0x5A1EULL
 
-/* Demote tasks that are already past their deadline by this grace period.
- * The loader may set this to zero for a default-off diagnostic A/B.
- */
-const volatile __u64 deadline_grace_ns = 1000000ULL; /* 1ms */
 /* Default-off service-timing experiment: cap only BE/unhinted insertion.
  * FE (including budget-demoted FE) and the dedicated URGENT path are unchanged.
  */
@@ -179,7 +174,6 @@ struct task_state {
     u64 last_reported_deadline_miss_job;
     u64 last_reported_budget_overrun_job;
     u64 last_reported_budget_demotion_job;
-    u64 last_reported_stale_job;
     u64 urgent_trace_job;
     u32 urgent_trace_stage;
     u32 urgent_trace_mask;
@@ -489,7 +483,6 @@ void BPF_STRUCT_OPS(scx_fresh_enqueue, struct task_struct *p, u64 enq_flags)
     /*
      * Urgent service class.
      * - Always route to DSQ_URGENT (highest priority)
-     * - Never stale-demote or late-demote (preserved urgent-service exemption)
      * - A wakeup must preempt the currently running lower lane. Merely adding
      *   the task to a custom DSQ does not shorten the current task's slice;
      *   SCX_ENQ_PREEMPT takes effect only for a direct local insertion.
@@ -509,50 +502,10 @@ void BPF_STRUCT_OPS(scx_fresh_enqueue, struct task_struct *p, u64 enq_flags)
         return;
     }
 
-    /* Executor-owned subscriptions enforce age before admission and callback
-     * entry. Age demotion cannot safely revoke that ownership: it can strand
-     * the owner before its recheck/return/clear path. Leave those jobs in their
-     * normal class, with the same budget demotion below. Unflagged clients keep
-     * the existing firm-deadline policy. No queue selection happens here.
+    /* Time bounds order service; only the application decides whether a job
+     * remains useful. In particular, a late owner must still be able to reach
+     * its completion/cancellation path. CPU-budget demotion remains separate.
      */
-    /* Staleness check (guard future release timestamps). */
-    bool stale = false;
-    if (h->stale_ns && h->release_ts_ns) {
-        u64 age = safe_age_ns(now_ns, h->release_ts_ns);
-        if (age > h->stale_ns)
-            stale = true;
-    }
-
-    if (stale && !(h->flags & FRESH_HINT_EXECUTOR_OWNED)) {
-        if (st->last_reported_stale_job != h->job_id) {
-            emit_evt(FRESH_EVT_STALE_DEMOTION, key, h, st, now_ns);
-            st->last_reported_stale_job = h->job_id;
-        }
-        trace_urgent_enqueue(p, st, enq_flags, DSQ_STALE);
-        scx_insert_vtime(p, DSQ_STALE, slice, st->vruntime, enq_flags);
-        return;
-    }
-
-    /*
-     * Firm-ish late demotion:
-     * If already past deadline, treat as stale/low priority.
-     * (URGENT is exempt above.)
-     *
-     * Grace avoids flapping around the boundary. Keep the subtraction after
-     * now > deadline so the comparison cannot overflow near U64_MAX.
-     */
-    if (!(h->flags & FRESH_HINT_EXECUTOR_OWNED) &&
-        h->deadline_ts_ns && now_ns > h->deadline_ts_ns &&
-        now_ns - h->deadline_ts_ns > deadline_grace_ns) {
-        if (st->last_reported_deadline_miss_job != h->job_id) {
-            emit_evt(FRESH_EVT_DEADLINE_MISS, key, h, st, now_ns);
-            st->last_reported_deadline_miss_job = h->job_id;
-        }
-        trace_urgent_enqueue(p, st, enq_flags, DSQ_STALE);
-        scx_insert_vtime(p, DSQ_STALE, slice, st->vruntime, enq_flags);
-        return;
-    }
-
     if (h->class_id == FRESH_CLASS_DEADLINE) {
         if (!st->overrun) {
             trace_urgent_enqueue(p, st, enq_flags, DSQ_DEADLINE);
@@ -582,9 +535,7 @@ void BPF_STRUCT_OPS(scx_fresh_dispatch, s32 cpu, struct task_struct *prev)
         return;
     if (scx_move_to_local(DSQ_DEADLINE))
         return;
-    if (scx_move_to_local(DSQ_BACKGROUND))
-        return;
-    (void)scx_move_to_local(DSQ_STALE);
+    (void)scx_move_to_local(DSQ_BACKGROUND);
 }
 
 void BPF_STRUCT_OPS(scx_fresh_running, struct task_struct *p)
@@ -655,10 +606,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(scx_fresh_init)
     if (err)
         return err;
 
-    err = scx_bpf_create_dsq(DSQ_STALE, -1);
-    if (err)
-        return err;
-
     return 0;
 }
 
@@ -667,7 +614,6 @@ void BPF_STRUCT_OPS(scx_fresh_exit, struct scx_exit_info *ei)
     scx_bpf_destroy_dsq(DSQ_URGENT);
     scx_bpf_destroy_dsq(DSQ_DEADLINE);
     scx_bpf_destroy_dsq(DSQ_BACKGROUND);
-    scx_bpf_destroy_dsq(DSQ_STALE);
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(scx_fresh_init_task, struct task_struct *p,

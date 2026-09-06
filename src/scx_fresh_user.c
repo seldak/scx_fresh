@@ -89,7 +89,6 @@ static int handle_evt(void *ctx, void *data, size_t data_sz)
     switch (e->kind) {
     case FRESH_EVT_DEADLINE_MISS:  kind = "DEADLINE_MISS"; break;
     case FRESH_EVT_BUDGET_OVERRUN: kind = "BUDGET_OVERRUN"; break;
-    case FRESH_EVT_STALE_DEMOTION: kind = "STALE_DEMOTION"; break;
     case FRESH_EVT_BUDGET_DEMOTION: kind = "BUDGET_DEMOTION"; break;
     default: break;
     }
@@ -178,7 +177,6 @@ static void usage(const char *argv0)
             "  --print-ops-flags: inspect embedded BPF flags without loading or attaching\n"
             "  --print-config: inspect flags and selected probe options without attaching\n"
             "  --urgent-preempt wakeup|always: opt-in preemption probe (default wakeup)\n"
-            "  --deadline-grace-us N: late-demotion grace in microseconds (default 1000)\n"
             "  --be-slice-cap-us N: BE/unhinted insertion slice cap (default 0 = off)\n"
             "  --trace-urgent: sampled enqueue events and unsampled counters (default off)\n"
             "  --trace-stage N: unsampled enqueue lanes for application stage N for perf correlation (default off)\n"
@@ -268,7 +266,6 @@ int main(int argc, char **argv)
     uint32_t stage_id = FRESH_STAGE_UNSPECIFIED;
     const char *worker_name = "";
     int execution_cpu = -1;
-    uint64_t deadline_grace_us = 1000;
     uint64_t be_slice_cap_us = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -298,23 +295,20 @@ int main(int argc, char **argv)
                 fprintf(stderr, "trace worker name must contain 1 to 15 bytes\n");
                 return 1;
             }
-        } else if ((!strcmp(argv[i], "--deadline-grace-us") ||
-                    !strcmp(argv[i], "--be-slice-cap-us")) && i + 1 < argc) {
-            int is_cap = !strcmp(argv[i], "--be-slice-cap-us");
+        } else if (!strcmp(argv[i], "--deadline-grace-us")) {
+            fprintf(stderr, "--deadline-grace-us was removed: expiry is application-owned\n");
+            return 1;
+        } else if (!strcmp(argv[i], "--be-slice-cap-us") && i + 1 < argc) {
             char *end = NULL;
             const char *value = argv[++i];
             errno = 0;
             unsigned long long parsed = strtoull(value, &end, 10);
             if (errno || !*value || strspn(value, "0123456789") != strlen(value) ||
                 !end || *end || parsed > UINT64_MAX / 1000ULL) {
-                fprintf(stderr, "invalid %s: %s\n",
-                        is_cap ? "BE slice cap" : "deadline grace", value);
+                fprintf(stderr, "invalid BE slice cap: %s\n", value);
                 return 1;
             }
-            if (is_cap)
-                be_slice_cap_us = (uint64_t)parsed;
-            else
-                deadline_grace_us = (uint64_t)parsed;
+            be_slice_cap_us = (uint64_t)parsed;
         } else if (!strcmp(argv[i], "--trace-execution-cpu") && i + 1 < argc) {
             char *end = NULL;
             errno = 0;
@@ -366,7 +360,6 @@ int main(int argc, char **argv)
     skel->rodata->trace_stage_id = stage_id;
     memcpy((void *)skel->rodata->trace_worker_name, worker_name, strlen(worker_name) + 1);
     skel->rodata->execution_trace_cpu = execution_cpu;
-    skel->rodata->deadline_grace_ns = deadline_grace_us * 1000ULL;
     skel->rodata->be_slice_cap_ns = be_slice_cap_us * 1000ULL;
     if (execution_cpu < 0)
         bpf_map__set_max_entries(skel->maps.execution_events, 4096);
@@ -380,11 +373,10 @@ int main(int argc, char **argv)
             printf("0x%llx\n", skel->struct_ops.scx_fresh_ops->flags);
         else
             printf("ops_flags=0x%llx urgent_preempt=%s trace_urgent=%u execution_cpu=%d "
-                   "trace_stage=%u deadline_grace_us=%llu be_slice_cap_us=%llu\n",
+                   "trace_stage=%u expiry_policy=application be_slice_cap_us=%llu\n",
                    skel->struct_ops.scx_fresh_ops->flags,
                    skel->rodata->urgent_preempt_always ? "always" : "wakeup",
                    skel->rodata->trace_urgent_enqueues, execution_cpu, trace_stage,
-                   (unsigned long long)deadline_grace_us,
                    (unsigned long long)be_slice_cap_us);
         scx_fresh_bpf__destroy(skel);
         return 0;
@@ -402,10 +394,9 @@ int main(int argc, char **argv)
     }
 
     printf("Loading scheduler with ops_flags=0x%llx urgent_preempt=%s trace_urgent=%u execution_cpu=%d "
-           "trace_stage=%u deadline_grace_us=%llu be_slice_cap_us=%llu\n",
+           "trace_stage=%u expiry_policy=application be_slice_cap_us=%llu\n",
            skel->struct_ops.scx_fresh_ops->flags,
            preempt_always ? "always" : "wakeup", trace_urgent, execution_cpu, trace_stage,
-           (unsigned long long)deadline_grace_us,
            (unsigned long long)be_slice_cap_us);
     err = scx_fresh_bpf__load(skel);
     if (err) {

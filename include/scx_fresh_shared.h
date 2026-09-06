@@ -25,7 +25,7 @@ extern "C" {
 #endif
 
 /* Bump for incompatible layout or service-semantics changes. */
-#define FRESH_API_VERSION 2
+#define FRESH_API_VERSION 3
 
 /* Scheduling class hint (userspace -> BPF). */
 enum fresh_service_class : uint32_t {
@@ -37,22 +37,16 @@ enum fresh_service_class : uint32_t {
 /* Stage identity is application-defined and diagnostic only. */
 #define FRESH_STAGE_UNSPECIFIED ((uint32_t)~0U)
 
-/* Userspace rejects expired selections and rechecks before callback entry.
- * Keep the selected owner's normal lane until it releases the slot; CPU
- * budget enforcement still applies. This is not permission to select backlog.
- */
-#define FRESH_HINT_EXECUTOR_OWNED (1U << 0)
-
 struct fresh_task_hint {
     uint32_t api_version;      /* must be FRESH_API_VERSION */
     uint32_t stage_id;         /* application-defined diagnostic identity */
     uint32_t class_id;         /* enum fresh_service_class */
-    uint32_t flags;            /* FRESH_HINT_* */
+    uint32_t flags;            /* reserved; publish zero */
 
     uint64_t job_id;           /* monotonic per stage/thread */
     uint64_t release_ts_ns;    /* when job became ready (CLOCK_MONOTONIC) */
     uint64_t deadline_ts_ns;   /* absolute deadline; 0 => none */
-    uint64_t stale_ns;         /* freshness window; 0 => never stale */
+    uint64_t stale_ns;         /* relative ordering bound; 0 => none */
 
     uint64_t budget_ns;        /* 0 => no budget enforcement */
     uint64_t slice_ns;         /* 0 => scheduler default */
@@ -65,7 +59,7 @@ struct fresh_task_hint {
 enum fresh_evt_kind : uint32_t {
     FRESH_EVT_DEADLINE_MISS   = 1,
     FRESH_EVT_BUDGET_OVERRUN  = 2,
-    FRESH_EVT_STALE_DEMOTION  = 3,
+    /* Event ID 3 was age demotion and is no longer emitted. */
     FRESH_EVT_BUDGET_DEMOTION = 4,
     FRESH_EVT_URGENT_ENQUEUE    = 5, /* Extended diagnostic record below. */
     FRESH_EVT_STAGE_ENQUEUE    = 6, /* Opt-in lane attribution alongside perf sched. */

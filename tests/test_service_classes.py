@@ -73,7 +73,7 @@ DSQS
 struct task_struct { int unused; };
 struct task_state {
     u64 last_job_id, exec_ns_in_job, vruntime;
-    u64 last_reported_stale_job, last_reported_deadline_miss_job;
+    u64 last_reported_deadline_miss_job;
     u64 last_reported_budget_demotion_job;
     bool overrun;
 };
@@ -82,7 +82,6 @@ static struct fresh_task_hint hint;
 static bool present = true, has_state = true;
 static int task_hints;
 static u64 now = 100000000, destination, inserted_flags, inserted_slice, order;
-static const u64 deadline_grace_ns = 1000000;
 static u64 be_slice_cap_ns;
 static bool urgent_preempt_always;
 static void *bpf_map_lookup_elem(void *map, const void *key) {
@@ -125,20 +124,30 @@ int main(void) {
         assert(inserted_slice==2000000);
         hint.deadline_ts_ns=now-2000000;
         hint.class_id=FRESH_CLASS_DEADLINE;
-        run(0, DSQ_STALE, false);
-        hint.flags=FRESH_HINT_EXECUTOR_OWNED;
         run(0, DSQ_DEADLINE, false);
+        // An already-expired freshness bound affects ordering, never routing.
+        hint.release_ts_ns=1; hint.stale_ns=1;
+        run(SCX_ENQ_WAKEUP, DSQ_DEADLINE, false);
+        assert(order==2);
+        // Simulate a callback tail re-enqueued much later with its slot intact.
+        now+=1000000000;
+        run(0, DSQ_DEADLINE, false);
+        assert(hint.job_id==7 && state.last_job_id==7);
+        hint.class_id=FRESH_CLASS_BACKGROUND;
+        run(0, DSQ_BACKGROUND, false);
+        assert(inserted_slice==2000000);
+        hint.class_id=FRESH_CLASS_DEADLINE;
         state.overrun=true;
         run(0, DSQ_BACKGROUND, false);
         assert(inserted_slice==SCX_SLICE_DFL); // Original Deadline class is not capped.
         hint.class_id=FRESH_CLASS_URGENT;
-        run(SCX_ENQ_WAKEUP, SCX_DSQ_LOCAL, true); // Preserved overrun/age exemption.
+        run(SCX_ENQ_WAKEUP, SCX_DSQ_LOCAL, true); // Preserved Urgent overrun exemption.
         assert(inserted_slice==SCX_SLICE_DFL);
         hint.class_id=FRESH_CLASS_DEADLINE;
         hint.job_id++;
         run(0, DSQ_DEADLINE, false);
         assert(!state.overrun && state.exec_ns_in_job==0);
-        hint.api_version=1;
+        hint.api_version=2;
         hint.class_id=FRESH_CLASS_URGENT;
         run(SCX_ENQ_WAKEUP, DSQ_BACKGROUND, false);
         hint.api_version=FRESH_API_VERSION;

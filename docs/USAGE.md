@@ -33,8 +33,8 @@ ring buffer. Stop the foreground loader with Ctrl-C to detach it. Configure
 application workers as SCHED_EXT and set CPU affinity separately; the loader
 does not enroll an arbitrary application or reserve a CPU set for it.
 
-The default policy uses wakeup-only preemption for its Urgent class, a
-1 ms deadline grace, and no Background slice cap. These are implementation defaults,
+The default policy uses wakeup-only preemption for its Urgent class and no
+Background slice cap. Expiry is application-owned. These are implementation defaults,
 not an application deadline guarantee.
 
 | Loader option | Purpose |
@@ -42,7 +42,6 @@ not an application deadline guarantee.
 | `--pin DIR` | Select map pin directory for attachment. |
 | `--print-ops-flags` | Inspect embedded flags without attachment. |
 | `--print-config` | Inspect selected configuration without attachment. |
-| `--deadline-grace-us N` | Set late-demotion grace; default 1000. |
 | `--be-slice-cap-us N` | Cap eligible Background insertion slices; default 0 disables the cap. |
 
 `--help` also lists preemption and trace probes. They are opt-in
@@ -53,6 +52,9 @@ Execution tracing requires `--trace-worker-name NAME` to identify a worker by
 its thread name. `--trace-urgent` observes Urgent hints and can use that name to
 observe missing or misclassified hints. `--trace-stage N` observes an arbitrary
 application stage; it does not change that stage's service.
+
+`--print-config` reports `expiry_policy=application`. The removed
+`--deadline-grace-us` option is rejected rather than silently ignored.
 
 ## Build configuration
 

@@ -7,7 +7,7 @@ application processing.
 ## Responsibility boundary
 
 The following contract guides the generic scheduler design. The current
-implementation still has the legacy behavior described below.
+implementation and remaining policy gaps are described below.
 
 | Owner | Decisions |
 | --- | --- |
@@ -93,19 +93,19 @@ control who may publish hints; per-worker class authorization is not implemented
 | --- | --- |
 | Urgent class selects the dedicated queue and wakeup preemption | Implemented independently of stage identity. |
 | Deadline effective-deadline ordering without wakeup preemption | Same-class earlier-deadline preemption needs implementation and validation. |
-| Age demotion of unowned work to STALE | Expiry must remain an application decision without stranding the selected owner. |
+| Application-owned expiry, with no age demotion | Implemented for every class without an ownership flag. |
 | Job-budget overrun demotes Deadline to Background; Urgent routing is exempt | Exemptions now follow class; subsequent service still needs a defined rule. |
 | Strict dispatch precedence and an optional Background slice cap | Neither establishes a minimum service allocation for lower queues. |
 
-Generic class selection is implemented. Same-class deadline preemption, removal
-of age demotion, class permissions and replenished service remain future changes.
+Generic class selection and application-owned expiry are implemented. Same-class
+deadline preemption, class permissions and replenished service remain future changes.
 The hint and scheduler references describe the current ABI and routing rules.
 
 ## Limits
 
 Strict priority can starve lower queues. Budget demotion does not cancel work,
-and the ownership flag prevents age demotion but not budget demotion. Neither
-feature provides a hard real-time guarantee. The scheduler does not control
+but can delay the completion path. Removing age demotion does not establish
+minimum service or a hard real-time guarantee. The scheduler does not control
 GPU/ISP execution, synchronize measurements, or migrate an application job
 between workers. Kernel fallback on scheduler failure is not a timing guarantee.
 

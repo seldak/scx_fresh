@@ -12,15 +12,14 @@ Rules are applied in this order:
 | Condition | Destination |
 | --- | --- |
 | Urgent class, wakeup enqueue | CPU-local DSQ with `SCX_ENQ_PREEMPT` |
-| Urgent class, other enqueue | `DSQ_Urgent`, ordered by effective deadline |
-| Non-Urgent, unowned hint, stale or beyond deadline grace | `DSQ_STALE` |
+| Urgent class, other enqueue | `DSQ_URGENT`, ordered by effective deadline |
 | Deadline class, no budget overrun | `DSQ_DEADLINE`, ordered by effective deadline |
 | Background class, unhinted task, or Deadline budget overrun | `DSQ_BACKGROUND` |
 
 In `dispatch`, at most one task moves to the local DSQ, in this order:
 
 ```text
-Urgent -> Deadline -> Background -> STALE
+Urgent -> Deadline -> Background
 ```
 
 Moving one task avoids queuing a batch of lower-priority tasks ahead of a later
@@ -29,18 +28,14 @@ a running Background slice.
 
 ## Age and effective deadlines
 
-Age is `max(now - release_ts_ns, 0)`. A future release therefore does not
-underflow. For an unowned non-urgent hint:
+Expiry belongs to the application. An elapsed deadline or stale bound never
+demotes a worker. There is no STALE queue, ownership exemption or deadline-grace
+parameter. A late selected job retains its class unless CPU-budget enforcement
+demotes it. Deadline lateness is still observed at `stopping`; application
+completion metrics remain the authority for whether an output was timely.
 
-- A nonzero stale window and release timestamp enable stale demotion when
-  age exceeds `stale_ns`.
-- A nonzero deadline enables late demotion when elapsed time beyond the
-  deadline exceeds `deadline_grace_ns`, which defaults to 1 ms.
-
-Urgent is exempt from both checks. `FRESH_HINT_EXECUTOR_OWNED` exempts a selected
-non-urgent owner from age demotion so it can reach its recheck and completion
-path. The executor performs its own expiry checks without grace. The flag
-does not disable budget demotion or give BPF permission to select backlog.
+Age observations use `max(now - release_ts_ns, 0)`, with zero for an unspecified
+release. Future release times do not underflow.
 
 Within Urgent and Deadline queues, the effective deadline is the earliest available
 value among `deadline_ts_ns` and `release_ts_ns + stale_ns`. The latter is
@@ -78,14 +73,15 @@ for missing hints and non-urgent hints whose original class is Background.
 | `0` (default) | No cap; existing requested/default slices apply. |
 | Positive value | Eligible insertions use the smaller of the resolved slice and cap. |
 
-Original Background-class and unhinted work are eligible. Urgent and Deadline hints are not, including an Deadline job
+Original Background-class and unhinted work are eligible. Urgent and Deadline hints are not, including a Deadline job
 routed to Background after a budget overrun. The cap changes neither the global
 default slice nor queue order, deadlines, admission, or preemption.
 
 ## Hint lifetime and observability
 
 A worker's hint may remain visible after callback compute completes.
-That retained identity protects the userspace completion tail; it is replaced
+Retaining its class avoids a premature Background clear during the completion
+tail. The hint is replaced
 only after the executor establishes completion. See the
 [executor contract](HINTS_API.md#executor-contract).
 
