@@ -13,7 +13,7 @@ SOURCE = (ROOT / "bpf/scx_fresh.bpf.c").read_text()
 
 
 def function(name):
-    match = re.search(r"(?:static __always_inline [^\n]*\b" + name +
+    match = re.search(r"(?:static (?:__always_inline )?[^\n]*\b" + name +
                       r"\([^)]*\)|void BPF_STRUCT_OPS\(" + name +
                       r",[^)]*\))\n\{.*?\n\}", SOURCE, re.S)
     if not match:
@@ -76,6 +76,7 @@ struct task_state {
     u64 last_reported_deadline_miss_job;
     u64 last_reported_budget_demotion_job;
     bool overrun;
+    bool background_member, background_queued;
 };
 static struct task_state state;
 static struct fresh_task_hint hint;
@@ -97,6 +98,12 @@ static void scx_insert(struct task_struct *p, u64 dsq, u64 slice, u64 flags) {
 }
 static void scx_insert_vtime(struct task_struct *p, u64 dsq, u64 slice, u64 vtime, u64 flags) {
     scx_insert(p, dsq, slice, flags); order=vtime;
+}
+/* This suite freezes the disabled routing contract. Enabled server hooks
+ * and real enqueue_background are exercised by test_background_server.py. */
+static void enqueue_background(struct task_struct *p, struct task_state *st,
+                               u64 slice, u64 flags, u64 time) {
+    scx_insert_vtime(p, DSQ_BACKGROUND, slice, st ? st->vruntime : time, flags);
 }
 FUNCTIONS
 static void run(u64 flags, u64 dsq, bool preempt) {
@@ -162,7 +169,7 @@ int main(void) {
 '''
         program = program.replace("DSQS", "\n".join(re.findall(r"^#define DSQ_.*", SOURCE, re.M)))
         program = program.replace("FUNCTIONS", "\n".join(function(n) for n in
-            ("get_hint", "safe_age_ns", "effective_deadline_ns", "enqueue_slice_ns", "scx_fresh_enqueue")))
+            ("get_hint", "sync_job", "safe_age_ns", "effective_deadline_ns", "enqueue_slice_ns", "scx_fresh_enqueue")))
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / "classes"
             subprocess.run([*shlex.split(os.environ.get("CC", "cc")), "-std=gnu2x",

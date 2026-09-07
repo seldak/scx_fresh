@@ -16,7 +16,8 @@ Rules are applied in this order:
 | Deadline class, no budget overrun | `DSQ_DEADLINE`, ordered by effective deadline |
 | Background class, unhinted task, or Deadline budget overrun | `DSQ_BACKGROUND` |
 
-In `dispatch`, at most one task moves to the local DSQ, in this order:
+With the Background server disabled, `dispatch` moves at most one task to the
+local DSQ, in this order:
 
 ```text
 Urgent -> Deadline -> Background
@@ -25,6 +26,86 @@ Urgent -> Deadline -> Background
 Moving one task avoids queuing a batch of lower-priority tasks ahead of a later
 arrival. Only the default Urgent wakeup path preempts. Deadline arrival does not shorten
 a running Background slice.
+
+## Optional Background server
+
+`--background-server-us Q/P` configures one pool per CPU. Q is the runtime
+allocation in microseconds; P is the replenishment period in microseconds.
+Require `0 < Q <= P`. Omitting the option disables the server and retains the
+original routing, slices and fairness accounting. There is no default allocation.
+
+With the server enabled, native Background, unhinted workers and budget-demoted
+Deadline workers join the CPU's Background queue. Dispatch checks:
+
+```text
+Urgent -> Background with allocation remaining -> Deadline -> spare Background
+```
+
+All CPUs use fixed intervals aligned to monotonic time. At a new interval,
+the grant is Q minus unpaid protected-service overrun; unused allocation does
+not carry over. Overrun larger than Q can consume several future grants.
+Skipped intervals retire debt without accumulating positive credit. Urgent
+always takes precedence and never consumes this allocation. A server can use Q
+near the end of one period and another Q immediately after replenishment.
+`Q=P` can deny Deadline service while Background remains runnable.
+
+Background execution is charged from the kernel's task CPU-runtime counter
+before the `dispatch` decision, then checkpointed so `stopping` charges only
+the remaining delta. The kernel can call dispatch before stopping. Charging
+only in stopping would let the next worker consume an allocation that was
+already spent. Spare-capacity execution is charged too. Once Q is exhausted, Background
+is chosen only when Urgent and Deadline supply no runnable task. This is a
+dispatch rule: Deadline wakeups still do not preempt an executing slice.
+Server replenishment neither clears job overrun nor resets job CPU accounting.
+
+At `running`, Background's slice is bounded by any remaining allocation.
+Non-Urgent slices are also bounded by time to the next replenishment, so a long
+Deadline slice does not deliberately span it. A per-CPU monotonic BPF timer
+requests rescheduling at that bound; writing a slice alone does not guarantee
+a scheduling event when the local scheduler tick is stopped. Retaining the
+current worker rearms its timer without requiring a context switch. Stopping
+disarms it, and Urgent execution never arms it. The timer does not select work
+or charge CPU; dispatch still applies the same class and server rules.
+Timer delivery and scheduling boundaries can occur late. Allocation
+saturates at zero, but excess service ahead of waiting Deadline work becomes
+debt against future grants. Otherwise a small overrun on every slice could
+systematically exceed Q/P. Legitimate spare-capacity execution creates no debt.
+This is accounting of CPU already supplied, not saved unused allocation, a
+new job budget, or promotion to Deadline.
+
+For execution crossing a boundary, the old interval is charged before
+replenishment. The latest interval is charged up to its elapsed wall time;
+unknown interrupt placement is handled conservatively. This can reduce
+available service in that interval. Lifetime counters distinguish protected
+and spare CPU time and report overshoot, repayment and remaining debt.
+Protected-service classification checks the current Deadline worker or the
+first CPU-eligible worker found in the shared Deadline DSQ. Work pinned to
+other CPUs does not turn local spare service into protected-service debt.
+
+The server establishes precedence against Deadline on that CPU inside
+SCHED_EXT. Urgent work, foreign scheduling classes, interrupts and scheduling
+granularity can prevent delivery of Q in an interval. It is not an admission
+test or a hard real-time reservation.
+
+Fairness counts only Background CPU time when enabled. A worker entering from
+another service class starts at the pool's current virtual-time baseline, with
+no Deadline credit or debt. Sleep/wakeup and native Background job changes do
+not erase its accumulated service. Only waking sleepers are clamped to the
+advancing baseline; continuously runnable competitors retain their service
+deficit. Migration preserves positive debt relative to the destination pool.
+Background queues are CPU-specific and are not work-stolen by other CPUs;
+normal CPU selection still applies on wakeup. Pin workers for allocation tests.
+
+The runnable previous task is not yet in a DSQ during dispatch. It participates
+in class precedence explicitly: queued same-class work is considered first,
+then an eligible previous Urgent/Deadline task is retained before considering
+lower service. A budget-exhausted previous Deadline worker yields so stopping
+and enqueue can enforce demotion. This also corrects the disabled policy's
+former rotation into Background when its only Deadline worker was current.
+For Background, the current worker competes against the first ordered DSQ
+entry using actual Background virtual time; being queued does not itself
+give a worker precedence over a less-served current worker. Equal keys yield
+to the queued peer. This comparison applies to protected and spare service.
 
 ## Age and effective deadlines
 
@@ -45,9 +126,11 @@ current time. This is deadline ordering, not newest-message selection.
 ## Execution budgets
 
 BPF stores execution accounting per worker. A new `job_id` resets the job's
-execution total and overrun state at enqueue.
-At `stopping`, elapsed running time is added to `exec_ns_in_job` and
-`vruntime`.
+execution total and overrun state at enqueue. `running` also establishes job
+identity because enrollment may run a task before its first enqueue; otherwise
+that first enqueue could discard execution already charged to the job.
+At `stopping`, elapsed running time is added to `exec_ns_in_job` and the legacy
+`vruntime`. The enabled server uses separate Background-only CPU accounting.
 
 When execution exceeds a nonzero budget, the scheduler marks the job overrun
 and emits a budget-overrun event. A later enqueue sends overrun Deadline work to Background
@@ -76,6 +159,8 @@ for missing hints and non-urgent hints whose original class is Background.
 Original Background-class and unhinted work are eligible. Urgent and Deadline hints are not, including a Deadline job
 routed to Background after a budget overrun. The cap changes neither the global
 default slice nor queue order, deadlines, admission, or preemption.
+The server's runtime and period bounds apply later at `running`, including to
+demoted Deadline work. They do not change eligibility for the insertion cap.
 
 ## Hint lifetime and observability
 

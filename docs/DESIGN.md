@@ -40,17 +40,15 @@ protects the selected-work lifecycle; it does not grant unlimited CPU service.
 A per-job execution budget is not a periodic CPU reservation. Its exhaustion
 alone does not specify when the worker may receive service again.
 
-Background and budget-exhausted workers need an explicit progress rule. A
-replenished allocation is a candidate, not an implemented guarantee. Before
-adding it, define whether the allocation belongs to a worker or a class, its
-replenishment interval, and its interaction with per-job limits and overload.
-Guaranteed background service would consume capacity that higher classes cannot
-also claim. Automatic promotion merely because a worker has waited is not the
-proposed recovery mechanism.
+An optional per-CPU Background server supplies service ahead of Deadline to a
+shared pool of native Background and budget-demoted Deadline workers. Its Q/P
+allocation is separate from per-job limits and remains subordinate to Urgent.
+This consumes service that Deadline cannot also claim; it does not promote jobs
+or restore their budgets. See the [server rules](SCHEDULER.md#optional-background-server).
 
 Treatment of missing deadlines and deadline ties also needs an explicit rule.
 These choices must be settled before claiming predictable service; the current
-implementation provides neither reservations nor admission-based timing guarantees.
+implementation provides no admission-based timing guarantee.
 
 ## Current implementation
 
@@ -86,7 +84,8 @@ outside this policy's control.
 
 The [current policy](SCHEDULER.md) has three explicit service classes: Urgent,
 Deadline and Background. Application stage IDs are diagnostic only. Classes
-are fixed policy choices, not configurable reservations. Map write permissions
+are fixed policy choices; the optional Background allocation is shared per CPU.
+Map write permissions
 control who may publish hints; per-worker class authorization is not implemented.
 
 | Current mechanism | Difference from the intended contract |
@@ -94,16 +93,17 @@ control who may publish hints; per-worker class authorization is not implemented
 | Urgent class selects the dedicated queue and wakeup preemption | Implemented independently of stage identity. |
 | Deadline effective-deadline ordering without wakeup preemption | Same-class earlier-deadline preemption needs implementation and validation. |
 | Application-owned expiry, with no age demotion | Implemented for every class without an ownership flag. |
-| Job-budget overrun demotes Deadline to Background; Urgent routing is exempt | Exemptions now follow class; subsequent service still needs a defined rule. |
-| Strict dispatch precedence and an optional Background slice cap | Neither establishes a minimum service allocation for lower queues. |
+| Job-budget overrun demotes Deadline to Background; Urgent routing is exempt | Server service does not refill job budgets or restore Deadline standing. |
+| Optional per-CPU Background server | Supplies precedence over Deadline while funded; delivery depends on interference and scheduling granularity. |
 
 Generic class selection and application-owned expiry are implemented. Same-class
-deadline preemption, class permissions and replenished service remain future changes.
+deadline preemption and class permissions remain future changes. The optional
+Background server requires loaded validation before making service claims.
 The hint and scheduler references describe the current ABI and routing rules.
 
 ## Limits
 
-Strict priority can starve lower queues. Budget demotion does not cancel work,
+With the server disabled, strict priority can starve Background. Budget demotion does not cancel work,
 but can delay the completion path. Removing age demotion does not establish
 minimum service or a hard real-time guarantee. The scheduler does not control
 GPU/ISP execution, synchronize measurements, or migrate an application job

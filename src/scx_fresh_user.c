@@ -15,12 +15,16 @@
 #include <sys/syscall.h>
 #include <limits.h>
 #include <stdarg.h>
+#include <stdbool.h>
+#include <time.h>
 
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 
 #include "../include/scx_fresh_shared.h"
 #include "scx_fresh.skel.h"
+typedef uint64_t u64;
+#include "../bpf/background_server.h"
 
 static volatile sig_atomic_t g_exiting;
 
@@ -178,6 +182,7 @@ static void usage(const char *argv0)
             "  --print-config: inspect flags and selected probe options without attaching\n"
             "  --urgent-preempt wakeup|always: opt-in preemption probe (default wakeup)\n"
             "  --be-slice-cap-us N: BE/unhinted insertion slice cap (default 0 = off)\n"
+            "  --background-server-us Q/P: per-CPU Background runtime/period (omitted = off)\n"
             "  --trace-urgent: sampled enqueue events and unsampled counters (default off)\n"
             "  --trace-stage N: unsampled enqueue lanes for application stage N for perf correlation (default off)\n"
             "  --trace-worker-name NAME: worker comm for execution trace and urgent diagnostics\n"
@@ -255,6 +260,30 @@ static int ensure_dir(const char *dir)
     return 0;
 }
 
+static int print_background_stats(struct scx_fresh_bpf *skel, unsigned cpus)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    unsigned long long stamp = (unsigned long long)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+    for (uint32_t cpu = 0; cpu < cpus; cpu++) {
+        struct background_server s;
+        if (bpf_map_lookup_elem(bpf_map__fd(skel->maps.background_servers), &cpu, &s))
+            return -errno;
+        if (!s.cpu_ns)
+            continue;
+        printf("background_server_lifetime: cpu=%u cpu_ns=%llu protected_cpu_ns=%llu "
+               "spare_cpu_ns=%llu overshoot_ns=%llu repaid_ns=%llu debt_ns=%llu "
+               "native_cpu_ns=%llu demoted_cpu_ns=%llu ts_ns=%llu remaining_ns=%llu\n",
+               cpu,
+               (unsigned long long)s.cpu_ns, (unsigned long long)s.protected_cpu_ns,
+               (unsigned long long)s.spare_cpu_ns, (unsigned long long)s.excess_ns,
+               (unsigned long long)s.repaid_ns, (unsigned long long)s.debt_ns,
+               (unsigned long long)s.native_cpu_ns, (unsigned long long)s.demoted_cpu_ns,
+               stamp, (unsigned long long)s.remaining);
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *pin_dir = NULL;
@@ -267,6 +296,7 @@ int main(int argc, char **argv)
     const char *worker_name = "";
     int execution_cpu = -1;
     uint64_t be_slice_cap_us = 0;
+    uint64_t background_runtime_us = 0, background_period_us = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--pin") && i + 1 < argc) {
@@ -298,6 +328,26 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "--deadline-grace-us")) {
             fprintf(stderr, "--deadline-grace-us was removed: expiry is application-owned\n");
             return 1;
+        } else if (!strcmp(argv[i], "--background-server-us") && i + 1 < argc) {
+            const char *value = argv[++i];
+            char *end = NULL, *tail = NULL;
+            errno = 0;
+            unsigned long long q = strtoull(value, &end, 10);
+            if (errno || end == value || *end != '/' ||
+                strspn(value, "0123456789") != (size_t)(end - value)) {
+                fprintf(stderr, "invalid Background server: expected Q/P in microseconds\n");
+                return 1;
+            }
+            const char *period = end + 1;
+            unsigned long long p = strtoull(period, &tail, 10);
+            if (errno || !*period || *tail ||
+                strspn(period, "0123456789") != strlen(period) ||
+                !q || q > p || p > UINT64_MAX / 1000ULL) {
+                fprintf(stderr, "invalid Background server: require 0 < Q <= P without overflow\n");
+                return 1;
+            }
+            background_runtime_us = q;
+            background_period_us = p;
         } else if (!strcmp(argv[i], "--be-slice-cap-us") && i + 1 < argc) {
             char *end = NULL;
             const char *value = argv[++i];
@@ -361,6 +411,23 @@ int main(int argc, char **argv)
     memcpy((void *)skel->rodata->trace_worker_name, worker_name, strlen(worker_name) + 1);
     skel->rodata->execution_trace_cpu = execution_cpu;
     skel->rodata->be_slice_cap_ns = be_slice_cap_us * 1000ULL;
+    skel->rodata->background_runtime_ns = background_runtime_us * 1000ULL;
+    skel->rodata->background_period_ns = background_period_us * 1000ULL;
+    int possible_cpus = libbpf_num_possible_cpus();
+    if (possible_cpus < 1) {
+        fprintf(stderr, "failed to determine possible CPUs\n");
+        scx_fresh_bpf__destroy(skel);
+        return 1;
+    }
+    skel->rodata->background_nr_cpus = possible_cpus;
+    if (bpf_map__set_max_entries(skel->maps.background_servers,
+                                background_period_us ? possible_cpus : 1) ||
+        bpf_map__set_max_entries(skel->maps.background_timers,
+                                background_period_us ? possible_cpus : 1)) {
+        fprintf(stderr, "failed to size Background server map\n");
+        scx_fresh_bpf__destroy(skel);
+        return 1;
+    }
     if (execution_cpu < 0)
         bpf_map__set_max_entries(skel->maps.execution_events, 4096);
     /* No tracepoint load or attachment requirement for ordinary runs. */
@@ -373,11 +440,14 @@ int main(int argc, char **argv)
             printf("0x%llx\n", skel->struct_ops.scx_fresh_ops->flags);
         else
             printf("ops_flags=0x%llx urgent_preempt=%s trace_urgent=%u execution_cpu=%d "
-                   "trace_stage=%u expiry_policy=application be_slice_cap_us=%llu\n",
+                   "trace_stage=%u expiry_policy=application be_slice_cap_us=%llu "
+                   "background_runtime_us=%llu background_period_us=%llu\n",
                    skel->struct_ops.scx_fresh_ops->flags,
                    skel->rodata->urgent_preempt_always ? "always" : "wakeup",
                    skel->rodata->trace_urgent_enqueues, execution_cpu, trace_stage,
-                   (unsigned long long)be_slice_cap_us);
+                   (unsigned long long)be_slice_cap_us,
+                   (unsigned long long)background_runtime_us,
+                   (unsigned long long)background_period_us);
         scx_fresh_bpf__destroy(skel);
         return 0;
     }
@@ -394,10 +464,13 @@ int main(int argc, char **argv)
     }
 
     printf("Loading scheduler with ops_flags=0x%llx urgent_preempt=%s trace_urgent=%u execution_cpu=%d "
-           "trace_stage=%u expiry_policy=application be_slice_cap_us=%llu\n",
+           "trace_stage=%u expiry_policy=application be_slice_cap_us=%llu "
+           "background_runtime_us=%llu background_period_us=%llu\n",
            skel->struct_ops.scx_fresh_ops->flags,
            preempt_always ? "always" : "wakeup", trace_urgent, execution_cpu, trace_stage,
-           (unsigned long long)be_slice_cap_us);
+           (unsigned long long)be_slice_cap_us,
+           (unsigned long long)background_runtime_us,
+           (unsigned long long)background_period_us);
     err = scx_fresh_bpf__load(skel);
     if (err) {
         fprintf(stderr, "Failed to load BPF skeleton: %s\n", strerror(-err));
@@ -478,6 +551,10 @@ int main(int argc, char **argv)
     }
     if (execution_cpu >= 0 && print_execution_stats(skel)) {
         fprintf(stderr, "failed to read execution trace counters\n");
+        err = -EIO;
+    }
+    if (background_period_us && print_background_stats(skel, possible_cpus)) {
+        fprintf(stderr, "failed to read Background server counters\n");
         err = -EIO;
     }
     ring_buffer__free(rb);

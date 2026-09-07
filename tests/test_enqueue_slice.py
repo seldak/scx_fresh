@@ -88,10 +88,10 @@ int main(void) {
         body = source.split("void BPF_STRUCT_OPS(scx_fresh_enqueue,", 1)[1].split(
             "void BPF_STRUCT_OPS(scx_fresh_dispatch,", 1)[0]
         self.assertIn("u64 slice = enqueue_slice_ns(h);", body)
-        calls = re.findall(r"\bscx_insert(?:_vtime)?\(p, [^,]+, (slice|enqueue_slice_ns\(h\))[,)]", body)
+        calls = re.findall(r"\b(?:scx_insert(?:_vtime)?|enqueue_background)\(p, [^,]+, (slice|enqueue_slice_ns\(h\))[,)]", body)
         self.assertEqual(len(calls), 5)
         self.assertEqual(calls.count("enqueue_slice_ns(h)"), 1)  # No-state fallback.
-        self.assertEqual(len(re.findall(r"\bscx_insert(?:_vtime)?\(", body)), len(calls))
+        self.assertEqual(len(re.findall(r"\b(?:scx_insert(?:_vtime)?|enqueue_background)\(", body)), len(calls))
 
     def test_be_cap_is_default_off(self):
         self.assertIn("const volatile __u64 be_slice_cap_ns = 0;", SOURCE.read_text())
@@ -105,7 +105,8 @@ int main(void) {
         self.assertEqual(helper.count("trace_stage_enqueue(p, st, flags, dsq);"), 1)
         self.assertEqual(enqueue.count("trace_urgent_enqueue(p, st,"), 5)
         self.assertEqual(enqueue.count("scx_insert(p,"), 1)
-        self.assertEqual(enqueue.count("scx_insert_vtime(p,"), 4)
+        self.assertEqual(enqueue.count("scx_insert_vtime(p,"), 2)
+        self.assertEqual(enqueue.count("enqueue_background(p,"), 2)
         self.assertIn("if (!trace_stage_enqueues)\n        return;", source)
 
     def test_age_demotion_queue_and_flag_are_absent(self):

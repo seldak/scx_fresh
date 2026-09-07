@@ -14,6 +14,20 @@ LOADER = os.environ.get(
 
 
 class SchedulerModeTests(unittest.TestCase):
+    def test_background_server_pair(self):
+        config = subprocess.check_output([LOADER, "--print-config"], text=True)
+        self.assertIn("background_runtime_us=0 background_period_us=0", config)
+        for q, p in ((1000, 10000), (1, 1), (2000, 2000)):
+            config = subprocess.check_output([LOADER, "--print-config",
+                "--background-server-us", f"{q}/{p}"], text=True)
+            self.assertIn(f"background_runtime_us={q} background_period_us={p}", config)
+        for pair in ("", "0/10", "10/0", "11/10", "-1/10", "+1/10", "1/+10",
+                     "1/-10", " 1/10", "1/10 ", "1/", "/10", "1/2/3", "10",
+                     "1/18446744073709552", "18446744073709551616/20"):
+            result = subprocess.run([LOADER, "--print-config", "--background-server-us", pair],
+                                    capture_output=True)
+            self.assertNotEqual(result.returncode, 0, pair)
+
     def test_be_slice_cap_is_opt_in_and_validated(self):
         default = subprocess.check_output([LOADER, "--print-config"], text=True)
         self.assertIn("be_slice_cap_us=0", default)

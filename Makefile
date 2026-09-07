@@ -17,13 +17,16 @@ all: $(BUILD_DIR)/scx_fresh client
 bpf: $(SKEL_H)
 client: $(BUILD_DIR)/libfreshqos.a
 
+$(BUILD_DIR)/background_workload: tests/background_workload.c $(BUILD_DIR)/libfreshqos.a $(CLIENT_HEADERS)
+	$(CC) -O2 -g -Wall -Wextra -Werror -Iinclude -Isrc $< $(BUILD_DIR)/libfreshqos.a -lbpf -lpthread -o $@
+
 $(BUILD_DIR):
 	mkdir -p "$@"
 
 $(VMLINUX_H): | $(BUILD_DIR)
 	scripts/gen_vmlinux_h.sh "$@"
 
-$(BPF_OBJ): $(VMLINUX_H) bpf/scx_fresh.bpf.c bpf/execution_trace.bpf.h $(CLIENT_HEADERS)
+$(BPF_OBJ): $(VMLINUX_H) bpf/scx_fresh.bpf.c bpf/background_server.h bpf/execution_trace.bpf.h $(CLIENT_HEADERS)
 	$(BPF_CLANG) $(BPF_CFLAGS) -DFRESH_FULL_SWITCH=$(FRESH_FULL_SWITCH) -I$(BUILD_DIR) -Iinclude -Ibpf -c bpf/scx_fresh.bpf.c -o $@
 
 $(SKEL_H): $(BPF_OBJ)
@@ -35,10 +38,14 @@ $(BUILD_DIR)/freshqos.o: src/freshqos.c $(CLIENT_HEADERS) | $(BUILD_DIR)
 $(BUILD_DIR)/libfreshqos.a: $(BUILD_DIR)/freshqos.o
 	$(AR) rcs $@ $<
 
-$(BUILD_DIR)/scx_fresh: src/scx_fresh_user.c $(SKEL_H) $(BUILD_DIR)/libfreshqos.a $(CLIENT_HEADERS)
+$(BUILD_DIR)/scx_fresh: src/scx_fresh_user.c bpf/background_server.h $(SKEL_H) $(BUILD_DIR)/libfreshqos.a $(CLIENT_HEADERS)
 	$(CC) -O2 -g -I$(BUILD_DIR) -Iinclude -Isrc $< $(BUILD_DIR)/libfreshqos.a -lbpf -lelf -lz -o $@
 
-test: test-scheduler-mode test-slice test-classes
+test: test-scheduler-mode test-slice test-classes test-background
+
+.PHONY: test-background
+test-background:
+	CC="$(CC)" $(PYTHON) tests/test_background_server.py
 
 .PHONY: test-classes
 test-classes:

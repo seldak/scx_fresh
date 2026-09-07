@@ -133,6 +133,13 @@ static __always_inline bool scx_move_to_local(u64 dsq_id)
  * FE (including budget-demoted FE) and the dedicated URGENT path are unchanged.
  */
 const volatile __u64 be_slice_cap_ns = 0;
+const volatile __u64 background_runtime_ns = 0;
+const volatile __u64 background_period_ns = 0;
+/* Set by the loader from possible CPUs, not an application tuning parameter. */
+const volatile __u32 background_nr_cpus = 1;
+#define DSQ_BACKGROUND_CPU_BASE 0x100000000ULL
+
+#include "background_server.h"
 
 /* Opt-in diagnostic A/B probe, selected by the loader before attachment.
  * Default policy is unchanged. Both variants use the same BPF binary.
@@ -170,6 +177,13 @@ struct task_state {
     u8  overrun; /* budget exceeded for current job */
 
     u64 vruntime;
+    u64 background_vruntime;
+    u64 background_exec_start;
+    u64 background_wall_start;
+    u32 background_cpu;
+    bool background_member;
+    bool background_queued;
+    bool background_protected;
 
     u64 last_reported_deadline_miss_job;
     u64 last_reported_budget_overrun_job;
@@ -195,6 +209,153 @@ struct {
     __type(key, u64); /* pid_tgid */
     __type(value, struct task_state);
 } task_states SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1); /* Loader resizes to possible CPUs. */
+    __type(key, u32);
+    __type(value, struct background_server);
+} background_servers SEC(".maps");
+
+struct background_timer {
+    struct bpf_timer timer;
+    u64 deadline_ns;
+    bool active;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1); /* Loader resizes alongside background_servers. */
+    __type(key, u32);
+    __type(value, struct background_timer);
+} background_timers SEC(".maps");
+
+static int background_timer_expired(void *map, u32 *cpu, struct background_timer *t)
+{
+    if (!t->active)
+        return 0;
+    /* running may have replaced the slice while an old expiry was pending.
+     * CPU pinning serializes this callback with that CPU's scheduling hooks.
+     */
+    if (scx_now_ns() < t->deadline_ns) {
+        int err = bpf_timer_start(&t->timer, t->deadline_ns,
+                                  BPF_F_TIMER_ABS | BPF_F_TIMER_CPU_PIN);
+        if (err) {
+            static char msg[] = "Background timer rearm failed (%d)";
+            u64 data[] = {err};
+            scx_bpf_error_bstr(msg, data, sizeof(data));
+        }
+        return 0;
+    }
+    t->active = false;
+    scx_bpf_kick_cpu(*cpu, SCX_KICK_PREEMPT);
+    return 0;
+}
+
+/* Keep the address-taken map key in a separate verifier frame. Registering
+ * an asynchronous callback must not invalidate the caller's loop counter.
+ */
+static __noinline int init_background_timer(u32 cpu)
+{
+    struct background_timer *t = bpf_map_lookup_elem(&background_timers, &cpu);
+    if (!t)
+        return -2;
+    int err = bpf_timer_init(&t->timer, &background_timers, 1 /* CLOCK_MONOTONIC */);
+    if (err)
+        return err;
+    return bpf_timer_set_callback(&t->timer, background_timer_expired);
+}
+
+static __noinline void stop_background_timer(u32 cpu)
+{
+    struct background_timer *t = bpf_map_lookup_elem(&background_timers, &cpu);
+    if (t)
+        t->active = false;
+}
+
+static __always_inline void arm_background_timer(struct task_struct *p, bool urgent)
+{
+    if (!background_period_ns)
+        return;
+    u32 cpu = scx_bpf_task_cpu(p);
+    struct background_timer *t = bpf_map_lookup_elem(&background_timers, &cpu);
+    if (!t)
+        return;
+    t->active = !urgent;
+    if (urgent)
+        return;
+    t->deadline_ns = scx_now_ns() + (p->scx.slice ? p->scx.slice : 1);
+    int err = bpf_timer_start(&t->timer, t->deadline_ns,
+                              BPF_F_TIMER_ABS | BPF_F_TIMER_CPU_PIN);
+    if (err) {
+        static char msg[] = "Background timer start failed (%d)";
+        u64 data[] = {err};
+        scx_bpf_error_bstr(msg, data, sizeof(data));
+    }
+}
+
+static __always_inline void disarm_background_timer(struct task_struct *p)
+{
+    if (!background_period_ns)
+        return;
+    u32 cpu = scx_bpf_task_cpu(p);
+    struct background_timer *t = bpf_map_lookup_elem(&background_timers, &cpu);
+    if (t)
+        t->active = false;
+    /* Do not synchronously cancel from a runqueue-locked callback. The
+     * pending timer sees inactive, or the next running hook replaces it.
+     */
+}
+
+static __always_inline struct background_server *background_for_cpu(u32 cpu)
+{
+    return bpf_map_lookup_elem(&background_servers, &cpu);
+}
+
+static __always_inline u64 background_dsq(u32 cpu)
+{
+    return DSQ_BACKGROUND_CPU_BASE + cpu;
+}
+
+static __always_inline u64 task_background_dsq(struct task_struct *p)
+{
+    return background_period_ns ? background_dsq(scx_bpf_task_cpu(p)) : DSQ_BACKGROUND;
+}
+
+static __always_inline void enqueue_background(struct task_struct *p,
+                                               struct task_state *st,
+                                               u64 slice, u64 flags, u64 now)
+{
+    if (!background_period_ns) {
+        scx_insert_vtime(p, DSQ_BACKGROUND, slice, st ? st->vruntime : now, flags);
+        return;
+    }
+    u32 cpu = scx_bpf_task_cpu(p);
+    struct background_server *s = background_for_cpu(cpu);
+    u64 vtime = s ? s->vtime : 0;
+    if (st) {
+        /* A service-class transition joins at the current baseline. Sleeping
+         * does not reset membership; clamp sleepers without forgiving debt.
+         * Migration joins the destination pool, preserving positive debt.
+         */
+        if (!st->background_member) {
+            st->background_vruntime = vtime;
+        } else if (st->background_cpu != cpu) {
+            struct background_server *old = background_for_cpu(st->background_cpu);
+            u64 old_base = old ? old->vtime : st->background_vruntime;
+            u64 debt = st->background_vruntime > old_base ?
+                       st->background_vruntime - old_base : 0;
+            st->background_vruntime = vtime + debt;
+        } else if ((flags & SCX_ENQ_WAKEUP) && st->background_vruntime < vtime) {
+            st->background_vruntime = vtime;
+        }
+        st->background_cpu = cpu;
+        st->background_member = true;
+        st->background_queued = true;
+        vtime = st->background_vruntime;
+    }
+    scx_insert_vtime(p, background_dsq(cpu), slice, vtime, flags);
+}
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -244,6 +405,42 @@ static __always_inline struct fresh_task_hint *get_hint(u64 key)
     if (!h || h->api_version != FRESH_API_VERSION || h->class_id > FRESH_CLASS_URGENT)
         return NULL;
     return h;
+}
+
+static __always_inline void sync_job(struct task_state *st, const struct fresh_task_hint *h)
+{
+    u64 job = h ? h->job_id : 0;
+    if (job != st->last_job_id) {
+        st->exec_ns_in_job = 0;
+        st->overrun = 0;
+        st->last_job_id = job;
+    }
+}
+
+/* dispatch precedes stopping on a context switch. Checkpoint the server
+ * before choosing its next client; stopping charges only the remaining delta.
+ */
+static __always_inline void account_background(struct task_struct *p,
+                                               struct task_state *st, u64 now)
+{
+    if (!background_period_ns || !st || !st->last_start_ns || !st->background_queued)
+        return;
+    u64 total = BPF_CORE_READ(p, se.sum_exec_runtime);
+    u64 executed = total - st->background_exec_start;
+    struct background_server *s = background_for_cpu(scx_bpf_task_cpu(p));
+    st->background_vruntime += executed;
+    if (s) {
+        background_charge(s, st->background_wall_start, now, executed,
+                          background_runtime_ns, background_period_ns,
+                          st->background_protected);
+        struct fresh_task_hint *h = get_hint(task_pid_tgid(p));
+        if (h && h->class_id == FRESH_CLASS_DEADLINE)
+            s->demoted_cpu_ns += executed;
+        else
+            s->native_cpu_ns += executed;
+    }
+    st->background_exec_start = total;
+    st->background_wall_start = now;
 }
 
 static __always_inline u64 safe_age_ns(u64 now_ns, u64 release_ns)
@@ -455,8 +652,8 @@ void BPF_STRUCT_OPS(scx_fresh_enqueue, struct task_struct *p, u64 enq_flags)
 
     if (!st) {
         /* Should be rare (state is created in init_task), but never stall. */
-        trace_urgent_enqueue(p, st, enq_flags, DSQ_BACKGROUND);
-        scx_insert_vtime(p, DSQ_BACKGROUND, enqueue_slice_ns(h), now_ns, enq_flags);
+        trace_urgent_enqueue(p, st, enq_flags, task_background_dsq(p));
+        enqueue_background(p, st, enqueue_slice_ns(h), enq_flags, now_ns);
         return;
     }
 
@@ -472,13 +669,10 @@ void BPF_STRUCT_OPS(scx_fresh_enqueue, struct task_struct *p, u64 enq_flags)
     }
 
     /* Job boundary => reset per-job accounting. */
-    if (h->job_id != st->last_job_id) {
-        st->exec_ns_in_job = 0;
-        st->overrun = 0;
-        st->last_job_id = h->job_id;
-    }
+    sync_job(st, h);
 
     u64 slice = enqueue_slice_ns(h);
+    st->background_queued = false;
 
     /*
      * Urgent service class.
@@ -488,6 +682,7 @@ void BPF_STRUCT_OPS(scx_fresh_enqueue, struct task_struct *p, u64 enq_flags)
      *   SCX_ENQ_PREEMPT takes effect only for a direct local insertion.
      */
     if (h->class_id == FRESH_CLASS_URGENT) {
+        st->background_member = false;
         u64 vtime = effective_deadline_ns(h, now_ns);
 
         if (urgent_preempt_always || (enq_flags & SCX_ENQ_WAKEUP)) {
@@ -508,6 +703,7 @@ void BPF_STRUCT_OPS(scx_fresh_enqueue, struct task_struct *p, u64 enq_flags)
      */
     if (h->class_id == FRESH_CLASS_DEADLINE) {
         if (!st->overrun) {
+            st->background_member = false;
             trace_urgent_enqueue(p, st, enq_flags, DSQ_DEADLINE);
             u64 vtime = effective_deadline_ns(h, now_ns);
             scx_insert_vtime(p, DSQ_DEADLINE, slice, vtime, enq_flags);
@@ -521,20 +717,121 @@ void BPF_STRUCT_OPS(scx_fresh_enqueue, struct task_struct *p, u64 enq_flags)
     }
 
     /* BE or FE-overrun => DSQ_BACKGROUND */
-    trace_urgent_enqueue(p, st, enq_flags, DSQ_BACKGROUND);
-    scx_insert_vtime(p, DSQ_BACKGROUND, slice, st->vruntime, enq_flags);
+    trace_urgent_enqueue(p, st, enq_flags, task_background_dsq(p));
+    enqueue_background(p, st, slice, enq_flags, now_ns);
+}
+
+/* The shared Deadline DSQ can contain work pinned to other CPUs. */
+static __always_inline bool deadline_waiting_on(u32 cpu)
+{
+    struct bpf_iter_scx_dsq it;
+    struct task_struct *p;
+    bool waiting = false;
+    bpf_iter_scx_dsq_new(&it, DSQ_DEADLINE, 0);
+    while ((p = bpf_iter_scx_dsq_next(&it))) {
+        if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+            waiting = true;
+            break;
+        }
+    }
+    bpf_iter_scx_dsq_destroy(&it);
+    return waiting;
+}
+
+/* Compare only the first Background entry with runnable prev. */
+static __always_inline bool background_prefer_previous(u64 dsq, struct task_state *st)
+{
+    struct bpf_iter_scx_dsq it;
+    bpf_iter_scx_dsq_new(&it, dsq, 0);
+    struct task_struct *head = bpf_iter_scx_dsq_next(&it);
+    bool prefer = !head || st->background_vruntime < BPF_CORE_READ(head, scx.dsq_vtime);
+    bpf_iter_scx_dsq_destroy(&it);
+    return prefer;
+}
+
+static __always_inline void keep_background(struct task_struct *p, struct task_state *st,
+                                            struct background_server *s, bool protected)
+{
+    s->protect_next = protected;
+    st->background_protected = protected;
+    p->scx.slice = background_slice(s, enqueue_slice_ns(get_hint(task_pid_tgid(p))), true);
+    u64 boundary = background_period_ns - scx_now_ns() % background_period_ns;
+    if (p->scx.slice > boundary)
+        p->scx.slice = boundary;
+    arm_background_timer(p, false);
 }
 
 void BPF_STRUCT_OPS(scx_fresh_dispatch, s32 cpu, struct task_struct *prev)
 {
+    struct task_state *pst = prev ? get_state(task_pid_tgid(prev)) : NULL;
+    struct fresh_task_hint *ph = prev ? get_hint(task_pid_tgid(prev)) : NULL;
+    if (prev)
+        account_background(prev, pst, scx_now_ns());
+    bool runnable = prev && (prev->scx.flags & SCX_TASK_QUEUED);
+    bool urgent = runnable && ph && ph->class_id == FRESH_CLASS_URGENT;
+    bool deadline = runnable && ph && ph->class_id == FRESH_CLASS_DEADLINE &&
+                    pst && !pst->overrun;
+    /* Budget enforcement remains at the next enqueue. A spent current job
+     * must yield once so stopping/enqueue can perform that transition.
+     */
+    if (deadline && ph->budget_ns && pst->last_start_ns &&
+        pst->exec_ns_in_job + scx_now_ns() - pst->last_start_ns > ph->budget_ns)
+        deadline = false;
+
     /* Move one task per callback. Pre-filling the local DSQ with lower lanes
      * creates a priority inversion: an URGENT task that wakes afterward cannot
      * jump ahead of already-local FE/BE work.
      */
     if (scx_move_to_local(DSQ_URGENT))
         return;
+    if (urgent) {
+        prev->scx.slice = enqueue_slice_ns(ph);
+        arm_background_timer(prev, true);
+        return;
+    }
+    if (background_period_ns) {
+        struct background_server *s = background_for_cpu(cpu);
+        if (s) {
+            background_refresh(s, scx_now_ns(), background_runtime_ns, background_period_ns);
+            s->protect_next = false;
+            if (s->remaining) {
+                bool protected = deadline || deadline_waiting_on(cpu);
+                if (runnable && pst && pst->background_queued &&
+                    background_prefer_previous(background_dsq(cpu), pst)) {
+                    keep_background(prev, pst, s, protected);
+                    return;
+                }
+                if (scx_move_to_local(background_dsq(cpu))) {
+                    s->protect_next = protected;
+                    return;
+                }
+            }
+        }
+        if (scx_move_to_local(DSQ_DEADLINE))
+            return;
+        if (deadline) {
+            prev->scx.slice = enqueue_slice_ns(ph);
+            u64 boundary = background_period_ns - scx_now_ns() % background_period_ns;
+            if (prev->scx.slice > boundary)
+                prev->scx.slice = boundary;
+            arm_background_timer(prev, false);
+            return;
+        }
+        if (s && runnable && pst && pst->background_queued &&
+            background_prefer_previous(background_dsq(cpu), pst)) {
+            keep_background(prev, pst, s, false);
+            return;
+        }
+        if (!scx_move_to_local(background_dsq(cpu)) && pst)
+            pst->background_protected = false;
+        return;
+    }
     if (scx_move_to_local(DSQ_DEADLINE))
         return;
+    if (deadline) {
+        prev->scx.slice = enqueue_slice_ns(ph);
+        return;
+    }
     (void)scx_move_to_local(DSQ_BACKGROUND);
 }
 
@@ -546,11 +843,47 @@ void BPF_STRUCT_OPS(scx_fresh_running, struct task_struct *p)
         return;
 
     st->last_start_ns = scx_now_ns();
+    /* Enrollment can reach running before enqueue. Establish identity now
+     * so the first later enqueue cannot erase already-executed job time.
+     */
+    struct fresh_task_hint *h = get_hint(key);
+    sync_job(st, h);
+    if (background_period_ns) {
+        /* stopping can run remotely; use the task's CPU, never the callback's. */
+        u32 cpu = scx_bpf_task_cpu(p);
+        struct background_server *s = background_for_cpu(cpu);
+        st->background_exec_start = BPF_CORE_READ(p, se.sum_exec_runtime);
+        st->background_wall_start = st->last_start_ns;
+        if (s) {
+            background_refresh(s, st->last_start_ns, background_runtime_ns, background_period_ns);
+            /* A native Background task can also enter directly on enrollment.
+             * It must be charged even if enqueue has not classified it yet.
+             */
+            if ((!h || h->class_id == FRESH_CLASS_BACKGROUND) && !st->background_member) {
+                st->background_member = true;
+                st->background_queued = true;
+                st->background_cpu = cpu;
+                st->background_vruntime = s->vtime;
+            }
+            if (st->background_queued && st->background_vruntime > s->vtime)
+                s->vtime = st->background_vruntime;
+            st->background_protected = st->background_queued && s->protect_next;
+            if (!h || h->class_id != FRESH_CLASS_URGENT) {
+                u64 slice = background_slice(s, p->scx.slice,
+                                            st->background_queued);
+                u64 boundary = background_period_ns -
+                               (st->last_start_ns - s->period_start);
+                p->scx.slice = slice < boundary ? slice : boundary;
+            }
+        }
+    }
+    arm_background_timer(p, h && h->class_id == FRESH_CLASS_URGENT);
     execution_callback(p, FRESH_EXEC_RUNNING, true, 0);
 }
 
 void BPF_STRUCT_OPS(scx_fresh_stopping, struct task_struct *p, bool runnable)
 {
+    disarm_background_timer(p);
     const u64 now_ns = scx_now_ns();
     const u64 key = task_pid_tgid(p);
 
@@ -568,6 +901,7 @@ void BPF_STRUCT_OPS(scx_fresh_stopping, struct task_struct *p, bool runnable)
 
     st->exec_ns_in_job += delta;
     st->vruntime += delta;
+    account_background(p, st, now_ns);
 
     /* Budget demotion: if exec exceeds budget, mark overrun for this job. */
     if (h && h->budget_ns && st->exec_ns_in_job > h->budget_ns) {
@@ -591,6 +925,18 @@ void BPF_STRUCT_OPS(scx_fresh_stopping, struct task_struct *p, bool runnable)
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(scx_fresh_init)
 {
+    if (background_period_ns) {
+        if (!background_runtime_ns || background_runtime_ns > background_period_ns)
+            return -22;
+        for (u32 cpu = 0; cpu < background_nr_cpus; cpu++) {
+            s32 ret = scx_bpf_create_dsq(background_dsq(cpu), -1);
+            if (ret)
+                return ret;
+            ret = init_background_timer(cpu);
+            if (ret)
+                return ret;
+        }
+    }
     /* NUMA node -1 means "any". */
     s32 err;
 
@@ -611,6 +957,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(scx_fresh_init)
 
 void BPF_STRUCT_OPS(scx_fresh_exit, struct scx_exit_info *ei)
 {
+    if (background_period_ns) {
+        for (u32 cpu = 0; cpu < background_nr_cpus; cpu++) {
+            stop_background_timer(cpu);
+        }
+    }
     scx_bpf_destroy_dsq(DSQ_URGENT);
     scx_bpf_destroy_dsq(DSQ_DEADLINE);
     scx_bpf_destroy_dsq(DSQ_BACKGROUND);
@@ -622,7 +973,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(scx_fresh_init_task, struct task_struct *p,
     u64 key = task_pid_tgid(p);
     struct task_state init = {};
     init.vruntime = scx_now_ns();
-    bpf_map_update_elem(&task_states, &key, &init, BPF_ANY);
+    int err = bpf_map_update_elem(&task_states, &key, &init, BPF_ANY);
+    /* Server accounting requires a state slot for every enrolled worker. */
+    if (background_period_ns && err)
+        return err;
     return 0;
 }
 

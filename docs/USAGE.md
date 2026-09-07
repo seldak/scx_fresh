@@ -43,6 +43,35 @@ not an application deadline guarantee.
 | `--print-ops-flags` | Inspect embedded flags without attachment. |
 | `--print-config` | Inspect selected configuration without attachment. |
 | `--be-slice-cap-us N` | Cap eligible Background insertion slices; default 0 disables the cap. |
+| `--background-server-us Q/P` | Per-CPU Background runtime and period in microseconds; omitted means disabled. |
+
+For example, `--background-server-us 2000/10000` allows the Background pool
+2 ms ahead of Deadline in each 10 ms interval. This is a test configuration,
+not a recommended application default. See the [server rules](SCHEDULER.md#optional-background-server)
+for replenishment, interference and fairness semantics.
+
+The focused loaded test compares disabled service, that allocation, and the
+same allocation with periodic Urgent work. It keeps Deadline runnable and
+reports CPU time for native Background and budget-demoted Deadline workers in
+a common three-second window. It needs root and no attached scheduler:
+
+```bash
+make all test build/background_workload
+sudo python3 scripts/test_background_server.py --cpu 14 --housekeeping-cpu 1
+```
+
+Choose CPUs appropriate to the test machine. The test uses partial switch and
+detaches between cells. The probe checks combined Background CPU against 20%
+of the common window, native/demoted service balance, and maximum service gaps.
+It allows two periods plus two observation chunks for allocation and balance,
+and five periods for a Background gap. These finite-window tolerances do not
+establish a hard reservation or a latency guarantee; inspect the reported CPU
+shares and raw observation gaps.
+Bag regressions with the server omitted remain a separate disabled-policy gate.
+The loader also prints `background_server_lifetime` counters for CPUs that
+served Background. These include warmup and shutdown time and must not be
+compared directly with the workload's three-second window totals. They expose
+protected/spare service, overshoot, repaid allocation debt and outstanding debt.
 
 `--help` also lists preemption and trace probes. They are opt-in
 diagnostics, not additional default policy. Event counts describe scheduler
