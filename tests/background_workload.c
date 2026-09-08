@@ -54,7 +54,7 @@ static void *run(void *arg)
     }
     pthread_setname_np(pthread_self(), w->name);
     struct fresh_task_hint h = {
-        .api_version = FRESH_API_VERSION, .class_id = w->class_id,
+        .class_id = w->class_id,
         .job_id = 1, .deadline_ts_ns = w->budget ? begin - 1 : begin,
         .budget_ns = w->budget,
     };

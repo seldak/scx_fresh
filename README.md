@@ -4,9 +4,8 @@ A sched_ext scheduler for application-selected jobs, with explicit service
 classes and per-job timing hints.
 
 Applications select Urgent, Deadline or Background service explicitly. Stage
-identity is diagnostic and never selects a queue. The version 3 hint ABI requires
-clients and scheduler to use matching headers; older-version hints are not
-interpreted as service requests.
+identity is diagnostic and never selects a queue. The hint interface is not yet
+stable or versioned; rebuild clients and scheduler together using matching headers.
 
 Expiry and cancellation belong to the application; elapsed time bounds never
 demote a worker. An optional per-CPU Background server shares an allocation

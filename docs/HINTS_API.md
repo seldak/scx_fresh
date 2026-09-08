@@ -30,7 +30,6 @@ request for exemption from a kernel expiry rule.
 
 | Field | Meaning |
 | --- | --- |
-| `api_version` | Set to `FRESH_API_VERSION`. |
 | `stage_id` | Application-defined diagnostic identity; never selects service. |
 | `class_id` | `FRESH_CLASS_BACKGROUND`, `FRESH_CLASS_DEADLINE` or `FRESH_CLASS_URGENT`. |
 | `flags` | Reserved; publish zero. |
@@ -94,15 +93,22 @@ publication and replacement rules apply regardless of expiry policy.
 
 The MIT helper library is optional. A client may access the documented map
 layout directly, with the required map permissions and publication ordering.
-The helper sets the ABI version when constructing a job, but does not negotiate
-versions or validate application deadlines. Full-structure publication leaves
+The helper validates service fields but does not assess deadline feasibility.
+Full-structure publication leaves
 field initialization to the caller.
 
-ABI version 3 makes expiry application-owned and removes the executor-owned
-flag. The layout is unchanged, but the service semantics differ from version 2.
-Clients and scheduler must be rebuilt together. Older-version hints and unknown
-classes are treated as unhinted Background work; stage zero has no special
-meaning. The client rejects incompatible versions and unknown classes before
+Deadline hints must supply an absolute deadline or a
+nonzero release plus relative bound whose sum does not overflow. The client
+returns `-EINVAL` before updating the map if neither is usable; the previous
+slot remains unchanged, so callers must handle the error before waking work.
+Explicitly past deadlines remain valid. An overflowing relative bound is ignored
+when an absolute deadline is supplied. Urgent and Background need no deadline.
+Direct map writes violating this rule receive unhinted Background service and
+emit `INVALID_DEADLINE` on enqueue (subject to ring-buffer capacity).
+The interface is under development and has no ABI version or compatibility
+negotiation. Rebuild clients and scheduler together using matching headers.
+Unknown classes are treated as unhinted Background work; stage zero has no special
+meaning. The client rejects unknown classes before
 updating the map. See the [scheduler rules](SCHEDULER.md) for service treatment.
 
 Application-specific message lifetimes, sensor timestamps, and queue admission

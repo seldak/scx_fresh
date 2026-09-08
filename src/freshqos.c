@@ -47,7 +47,8 @@ void freshqos_close(struct freshqos *q)
 int freshqos_publish_hint(struct freshqos *q, const struct fresh_task_hint *hint)
 {
     if (!q || q->map_fd < 0 || !hint ||
-        hint->api_version != FRESH_API_VERSION || hint->class_id > FRESH_CLASS_URGENT)
+        hint->class_id > FRESH_CLASS_URGENT ||
+        (hint->class_id == FRESH_CLASS_DEADLINE && !fresh_hint_has_deadline(hint)))
         return -EINVAL;
 
     uint64_t key = freshqos_pid_tgid_self();
@@ -62,7 +63,8 @@ int freshqos_publish_hint(struct freshqos *q, const struct fresh_task_hint *hint
 int freshqos_publish_hint_for(struct freshqos *q, uint64_t pid_tgid, const struct fresh_task_hint *hint)
 {
     if (!q || q->map_fd < 0 || !hint || !pid_tgid ||
-        hint->api_version != FRESH_API_VERSION || hint->class_id > FRESH_CLASS_URGENT)
+        hint->class_id > FRESH_CLASS_URGENT ||
+        (hint->class_id == FRESH_CLASS_DEADLINE && !fresh_hint_has_deadline(hint)))
         return -EINVAL;
 
     uint64_t key = pid_tgid;
@@ -86,7 +88,6 @@ int freshqos_publish_job(struct freshqos *q,
                         uint32_t weight)
 {
     struct fresh_task_hint h = {};
-    h.api_version = FRESH_API_VERSION;
     h.stage_id = stage_id;
     h.class_id = class_id;
     h.job_id = job_id;
@@ -101,7 +102,6 @@ int freshqos_publish_job(struct freshqos *q,
 int freshqos_clear_hint(struct freshqos *q)
 {
     struct fresh_task_hint h = {};
-    h.api_version = FRESH_API_VERSION;
     h.stage_id = FRESH_STAGE_UNSPECIFIED;
     h.class_id = FRESH_CLASS_BACKGROUND;
     h.job_id = 0;
@@ -126,7 +126,6 @@ int freshqos_publish_job_for(struct freshqos *q,
                            uint32_t weight)
 {
     struct fresh_task_hint h = {};
-    h.api_version = FRESH_API_VERSION;
     h.stage_id = stage_id;
     h.class_id = class_id;
     h.job_id = job_id;

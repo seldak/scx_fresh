@@ -46,8 +46,8 @@ allocation is separate from per-job limits and remains subordinate to Urgent.
 This consumes service that Deadline cannot also claim; it does not promote jobs
 or restore their budgets. See the [server rules](SCHEDULER.md#optional-background-server).
 
-Treatment of missing deadlines and deadline ties also needs an explicit rule.
-These choices must be settled before claiming predictable service; the current
+Deadline service requires a usable time bound; invalid direct-map hints receive
+Background service. Equal deadlines do not trigger wakeup preemption. The
 implementation provides no admission-based timing guarantee.
 
 ## Current implementation

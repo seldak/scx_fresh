@@ -22,7 +22,7 @@ def function(name):
 
 
 class ServiceClasses(unittest.TestCase):
-    def test_client_rejects_incompatible_hints_before_map_update(self):
+    def test_client_rejects_invalid_hints_before_map_update(self):
         program = r'''
 #include <assert.h>
 #include <errno.h>
@@ -34,13 +34,21 @@ int bpf_map_update_elem(int fd, const void *key, const void *value, __u64 flags)
 }
 int main(void) {
     struct freshqos q = {.map_fd=42};
-    struct fresh_task_hint h = {.api_version=1, .class_id=FRESH_CLASS_URGENT};
-    assert(freshqos_publish_hint(&q, &h)==-EINVAL);
-    assert(freshqos_publish_hint_for(&q, 123, &h)==-EINVAL);
-    h.api_version=FRESH_API_VERSION; h.class_id=99;
+    struct fresh_task_hint h = {.class_id=99};
     assert(freshqos_publish_hint(&q, &h)==-EINVAL);
     assert(freshqos_publish_hint_for(&q, 123, &h)==-EINVAL);
     assert(writes==0);
+    h.class_id=FRESH_CLASS_DEADLINE;
+    assert(freshqos_publish_hint(&q, &h)==-EINVAL);
+    assert(freshqos_publish_hint_for(&q, 123, &h)==-EINVAL);
+    h.release_ts_ns=UINT64_MAX; h.stale_ns=1;
+    assert(freshqos_publish_hint(&q, &h)==-EINVAL);
+    assert(writes==0);
+    h.release_ts_ns=1; h.stale_ns=1;
+    assert(freshqos_publish_hint(&q, &h)==0);
+    h.release_ts_ns=0; h.stale_ns=0; h.deadline_ts_ns=1;
+    assert(freshqos_publish_hint_for(&q, 123, &h)==0);
+    writes=0;
     for (unsigned cls=0; cls<=FRESH_CLASS_URGENT; cls++) {
         h.class_id=cls; h.stage_id=UINT32_MAX;
         assert(freshqos_publish_hint(&q, &h)==0);
@@ -92,7 +100,8 @@ static u64 scx_now_ns(void) { return now; }
 static u64 task_pid_tgid(struct task_struct *p) { (void)p; return 42; }
 static struct task_state *get_state(u64 key) { (void)key; return has_state ? &state : NULL; }
 #define trace_urgent_enqueue(...) ((void)0)
-#define emit_evt(...) ((void)0)
+static unsigned invalid_events;
+#define emit_evt(kind, ...) ((void)(invalid_events += ((kind)==FRESH_EVT_INVALID_DEADLINE)))
 static void scx_insert(struct task_struct *p, u64 dsq, u64 slice, u64 flags) {
     (void)p; destination=dsq; inserted_slice=slice; inserted_flags=flags;
 }
@@ -119,7 +128,7 @@ int main(void) {
     const uint32_t stages[] = {0, 1, 2, 15, 31, 12345, UINT32_MAX};
     for (unsigned i=0; i<sizeof(stages)/sizeof(stages[0]); i++) {
         state = (struct task_state){.last_job_id=7};
-        hint = (struct fresh_task_hint){.api_version=FRESH_API_VERSION,
+        hint = (struct fresh_task_hint){
             .stage_id=stages[i], .job_id=7, .release_ts_ns=now-1000,
             .deadline_ts_ns=now+5000, .stale_ns=10000};
         hint.class_id=FRESH_CLASS_URGENT;
@@ -128,6 +137,16 @@ int main(void) {
         hint.class_id=FRESH_CLASS_DEADLINE;
         run(SCX_ENQ_WAKEUP, DSQ_DEADLINE, false);
         assert(order==hint.deadline_ts_ns);
+        hint.deadline_ts_ns=0; hint.stale_ns=0;
+        unsigned before=invalid_events;
+        run(SCX_ENQ_WAKEUP, DSQ_BACKGROUND, false);
+        assert(invalid_events==before+1);
+        hint.release_ts_ns=UINT64_MAX; hint.stale_ns=1;
+        run(SCX_ENQ_WAKEUP, DSQ_BACKGROUND, false);
+        assert(invalid_events==before+2);
+        hint.release_ts_ns=now-1000;
+        hint.deadline_ts_ns=now+5000; hint.stale_ns=10000;
+        run(SCX_ENQ_WAKEUP, DSQ_DEADLINE, false);
         hint.class_id=FRESH_CLASS_BACKGROUND;
         be_slice_cap_ns=2000000;
         run(SCX_ENQ_WAKEUP, DSQ_BACKGROUND, false);
@@ -157,10 +176,6 @@ int main(void) {
         hint.job_id++;
         run(0, DSQ_DEADLINE, false);
         assert(!state.overrun && state.exec_ns_in_job==0);
-        hint.api_version=2;
-        hint.class_id=FRESH_CLASS_URGENT;
-        run(SCX_ENQ_WAKEUP, DSQ_BACKGROUND, false);
-        hint.api_version=FRESH_API_VERSION;
         hint.class_id=999;
         run(SCX_ENQ_WAKEUP, DSQ_BACKGROUND, false);
     }

@@ -24,9 +24,6 @@ typedef __u64 uint64_t;
 extern "C" {
 #endif
 
-/* Bump for incompatible layout or service-semantics changes. */
-#define FRESH_API_VERSION 3
-
 /* Scheduling class hint (userspace -> BPF). */
 enum fresh_service_class : uint32_t {
     FRESH_CLASS_BACKGROUND = 0,  /* best-effort / background */
@@ -38,7 +35,6 @@ enum fresh_service_class : uint32_t {
 #define FRESH_STAGE_UNSPECIFIED ((uint32_t)~0U)
 
 struct fresh_task_hint {
-    uint32_t api_version;      /* must be FRESH_API_VERSION */
     uint32_t stage_id;         /* application-defined diagnostic identity */
     uint32_t class_id;         /* enum fresh_service_class */
     uint32_t flags;            /* reserved; publish zero */
@@ -55,6 +51,14 @@ struct fresh_task_hint {
     uint32_t _pad;
 };
 
+/* A relative bound must not wrap the monotonic timestamp. */
+static inline int fresh_hint_has_deadline(const struct fresh_task_hint *h)
+{
+    return h->deadline_ts_ns ||
+        (h->release_ts_ns && h->stale_ns &&
+         h->stale_ns <= (uint64_t)-1 - h->release_ts_ns);
+}
+
 /* Events (BPF -> userspace). */
 enum fresh_evt_kind : uint32_t {
     FRESH_EVT_DEADLINE_MISS   = 1,
@@ -63,6 +67,7 @@ enum fresh_evt_kind : uint32_t {
     FRESH_EVT_BUDGET_DEMOTION = 4,
     FRESH_EVT_URGENT_ENQUEUE    = 5, /* Extended diagnostic record below. */
     FRESH_EVT_STAGE_ENQUEUE    = 6, /* Opt-in lane attribution alongside perf sched. */
+    FRESH_EVT_INVALID_DEADLINE = 7,
 };
 
 struct fresh_evt {

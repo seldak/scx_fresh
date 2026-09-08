@@ -403,7 +403,8 @@ static __always_inline struct task_state *get_state(u64 key)
 static __always_inline struct fresh_task_hint *get_hint(u64 key)
 {
     struct fresh_task_hint *h = bpf_map_lookup_elem(&task_hints, &key);
-    if (!h || h->api_version != FRESH_API_VERSION || h->class_id > FRESH_CLASS_URGENT)
+    if (!h || h->class_id > FRESH_CLASS_URGENT ||
+        (h->class_id == FRESH_CLASS_DEADLINE && !fresh_hint_has_deadline(h)))
         return NULL;
     return h;
 }
@@ -481,21 +482,20 @@ static __always_inline void emit_evt(u32 kind, u64 key,
     bpf_ringbuf_submit(e, 0);
 }
 
-/* Compute effective deadline for FE */
+/* Compute the selected job's ordering bound. Zero means unspecified. */
 static __always_inline u64 effective_deadline_ns(const struct fresh_task_hint *h, u64 now_ns)
 {
     u64 eff = h->deadline_ts_ns;
 
     /* freshness window bounds the effective deadline */
-    if (h->stale_ns && h->release_ts_ns) {
+    if (h->stale_ns && h->release_ts_ns &&
+        h->stale_ns <= (u64)-1 - h->release_ts_ns) {
         u64 latest_useful = h->release_ts_ns + h->stale_ns;
         if (!eff || latest_useful < eff)
             eff = latest_useful;
     }
 
-    /* no deadline provided => "run soon" */
-    if (!eff)
-        eff = now_ns;
+    (void)now_ns;
 
     return eff;
 }
@@ -675,6 +675,13 @@ void BPF_STRUCT_OPS(scx_fresh_enqueue, struct task_struct *p, u64 enq_flags)
     struct task_state *st = get_state(key);
     struct fresh_task_hint *h = get_hint(key);
 
+    if (!h) {
+        struct fresh_task_hint *raw = bpf_map_lookup_elem(&task_hints, &key);
+        if (raw &&
+            raw->class_id == FRESH_CLASS_DEADLINE && !fresh_hint_has_deadline(raw))
+            emit_evt(FRESH_EVT_INVALID_DEADLINE, key, raw, st, now_ns);
+    }
+
     if (!st) {
         /* Should be rare (state is created in init_task), but never stall. */
         trace_urgent_enqueue(p, st, enq_flags, task_background_dsq(p));
@@ -685,7 +692,6 @@ void BPF_STRUCT_OPS(scx_fresh_enqueue, struct task_struct *p, u64 enq_flags)
     /* Default hint: best-effort with no deadlines. */
     struct fresh_task_hint dh = {};
     if (!h) {
-        dh.api_version = FRESH_API_VERSION;
         dh.stage_id = FRESH_STAGE_UNSPECIFIED;
         dh.class_id = FRESH_CLASS_BACKGROUND;
         dh.job_id = 0;
@@ -709,6 +715,8 @@ void BPF_STRUCT_OPS(scx_fresh_enqueue, struct task_struct *p, u64 enq_flags)
     if (h->class_id == FRESH_CLASS_URGENT) {
         st->background_member = false;
         u64 vtime = effective_deadline_ns(h, now_ns);
+        if (!vtime)
+            vtime = now_ns; /* Preserve unspecified Urgent queue ordering. */
 
         if (urgent_preempt_always || (enq_flags & SCX_ENQ_WAKEUP)) {
             trace_urgent_enqueue(p, st, enq_flags, SCX_DSQ_LOCAL);

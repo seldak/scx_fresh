@@ -94,6 +94,7 @@ static int handle_evt(void *ctx, void *data, size_t data_sz)
     case FRESH_EVT_DEADLINE_MISS:  kind = "DEADLINE_MISS"; break;
     case FRESH_EVT_BUDGET_OVERRUN: kind = "BUDGET_OVERRUN"; break;
     case FRESH_EVT_BUDGET_DEMOTION: kind = "BUDGET_DEMOTION"; break;
+    case FRESH_EVT_INVALID_DEADLINE: kind = "INVALID_DEADLINE"; break;
     default: break;
     }
 

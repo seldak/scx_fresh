@@ -39,7 +39,7 @@ static void *worker(void *arg)
     CPU_ZERO(&mask); CPU_SET(cpu, &mask);
     if (pthread_setaffinity_np(pthread_self(), sizeof(mask), &mask)) abort();
     struct fresh_task_hint hint = {
-        .api_version=FRESH_API_VERSION, .class_id=FRESH_CLASS_DEADLINE, .job_id=1,
+        .class_id=FRESH_CLASS_DEADLINE, .job_id=1,
         .deadline_ts_ns=begin+(arrival ? 50000000ULL : 100000000ULL),
         .slice_ns=20000000ULL,
     };
