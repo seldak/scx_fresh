@@ -40,8 +40,16 @@ not an atomic promise to displace a particular worker.
 The focused loaded probe passed three trials: an earlier-deadline worker woke
 3 ms into a 20 ms Deadline callback and started after 69, 74 and 68 microseconds,
 before that callback completed. The server and BE cap were disabled. The loaded
-Background-server regression also passes. These checks establish the mechanism;
-application latency still needs separate validation.
+Background-server regression also passes.
+
+Application regression checks passed one 15-second measured run each with zero
+and two Background hogs, using a 2 ms BE cap and a 2 ms / 10 ms Background
+server. Both used source epoch `1403636579758555500` in the EuRoC synthetic
+workload: all 3000 Urgent callbacks and all 300 callbacks per downstream stage
+completed, with zero late callbacks, drops or unfinished work. With two hogs,
+Urgent p99 start age was 1.72 ms, estimator p99 completion age was 15.77 ms,
+and the hogs completed 11,936 iterations combined. These single runs showed no
+application regression; they do not establish a latency improvement.
 
 ## Optional Background server
 

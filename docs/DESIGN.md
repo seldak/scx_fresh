@@ -91,7 +91,7 @@ control who may publish hints; per-worker class authorization is not implemented
 | Current mechanism | Difference from the intended contract |
 | --- | --- |
 | Urgent class selects the dedicated queue and wakeup preemption | Implemented independently of stage identity. |
-| Deadline effective-deadline ordering and same-class wakeup preemption | Three focused loaded trials passed; application latency remains to be validated. |
+| Deadline effective-deadline ordering and same-class wakeup preemption | Three focused loaded trials and one application regression run each with zero and two Background hogs passed. |
 | Application-owned expiry, with no age demotion | Implemented for every class without an ownership flag. |
 | Job-budget overrun demotes Deadline to Background; Urgent routing is exempt | Server service does not refill job budgets or restore Deadline standing. |
 | Optional per-CPU Background server | Supplies precedence over Deadline while funded; delivery depends on interference and scheduling granularity. |
