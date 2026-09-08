@@ -69,6 +69,7 @@ extern void scx_bpf_destroy_dsq(u64 dsq_id) __ksym;
 /* CPU selection helper: keep weak and fallback. */
 extern s32 scx_bpf_select_cpu_dfl(struct task_struct *p, s32 prev_cpu,
                                   u64 wake_flags, bool *is_idle) __ksym __weak;
+extern struct task_struct *scx_bpf_cpu_curr(s32 cpu) __ksym __weak;
 
 /* Time source. */
 extern u64 scx_bpf_now(void) __ksym __weak;
@@ -627,6 +628,30 @@ static __always_inline void trace_urgent_enqueue(struct task_struct *p,
     bpf_ringbuf_submit(e, 0);
 }
 
+/* Only an eligible Deadline owner may be displaced by another Deadline job.
+ * Keep the arrival in its DSQ so dispatch still honors Urgent and the server.
+ */
+static __always_inline void preempt_later_deadline(struct task_struct *p, u64 deadline)
+{
+    if (!bpf_ksym_exists(scx_bpf_cpu_curr))
+        return;
+    s32 cpu = scx_bpf_task_cpu(p);
+    bpf_rcu_read_lock();
+    struct task_struct *current = scx_bpf_cpu_curr(cpu);
+    if (current && current != p && BPF_CORE_READ(current, policy) == 7) {
+        u64 key = task_pid_tgid(current);
+        struct task_state *st = get_state(key);
+        struct fresh_task_hint *h = get_hint(key);
+        if (st && h && h->class_id == FRESH_CLASS_DEADLINE &&
+            !st->overrun && !st->background_queued &&
+            st->last_job_id == h->job_id &&
+            (h->deadline_ts_ns || (h->release_ts_ns && h->stale_ns)) &&
+            deadline < effective_deadline_ns(h, scx_now_ns()))
+            scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+    }
+    bpf_rcu_read_unlock();
+}
+
 /* -----------------------------
  * sched_ext ops
  * ----------------------------- */
@@ -707,6 +732,9 @@ void BPF_STRUCT_OPS(scx_fresh_enqueue, struct task_struct *p, u64 enq_flags)
             trace_urgent_enqueue(p, st, enq_flags, DSQ_DEADLINE);
             u64 vtime = effective_deadline_ns(h, now_ns);
             scx_insert_vtime(p, DSQ_DEADLINE, slice, vtime, enq_flags);
+            if ((enq_flags & SCX_ENQ_WAKEUP) &&
+                (h->deadline_ts_ns || (h->release_ts_ns && h->stale_ns)))
+                preempt_later_deadline(p, vtime);
             return;
         }
 

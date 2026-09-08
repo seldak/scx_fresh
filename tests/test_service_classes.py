@@ -105,6 +105,9 @@ static void enqueue_background(struct task_struct *p, struct task_state *st,
                                u64 slice, u64 flags, u64 time) {
     scx_insert_vtime(p, DSQ_BACKGROUND, slice, st ? st->vruntime : time, flags);
 }
+static void preempt_later_deadline(struct task_struct *p, u64 deadline) {
+    (void)p; (void)deadline;
+}
 FUNCTIONS
 static void run(u64 flags, u64 dsq, bool preempt) {
     struct task_struct p = {};

@@ -87,6 +87,17 @@ application stage; it does not change that stage's service.
 
 ## Build configuration
 
+The focused Deadline preemption probe uses a 20ms Deadline callback and wakes
+an earlier-deadline worker after 3ms. Three repetitions must show an overlapping
+owner and a start delay below 5ms. This is a test tolerance, not a guarantee.
+
+```bash
+make all test build/deadline_workload
+sudo python3 scripts/test_deadline_preemption.py --cpu 14 --housekeeping-cpu 1
+```
+
+## Build variables
+
 `BUILD_DIR` selects generated output. `CC`, `AR`, `BPF_CLANG`, and `BPF_CFLAGS`
 select build tools and flags. Make does not track changes to command-line flags;
 clean the selected build directory before changing them.

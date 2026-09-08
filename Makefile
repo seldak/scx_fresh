@@ -20,6 +20,9 @@ client: $(BUILD_DIR)/libfreshqos.a
 $(BUILD_DIR)/background_workload: tests/background_workload.c $(BUILD_DIR)/libfreshqos.a $(CLIENT_HEADERS)
 	$(CC) -O2 -g -Wall -Wextra -Werror -Iinclude -Isrc $< $(BUILD_DIR)/libfreshqos.a -lbpf -lpthread -o $@
 
+$(BUILD_DIR)/deadline_workload: tests/deadline_workload.c $(BUILD_DIR)/libfreshqos.a $(CLIENT_HEADERS)
+	$(CC) -O2 -g -Wall -Wextra -Werror -Iinclude -Isrc $< $(BUILD_DIR)/libfreshqos.a -lbpf -lpthread -o $@
+
 $(BUILD_DIR):
 	mkdir -p "$@"
 

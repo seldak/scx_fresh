@@ -38,12 +38,17 @@ struct bpf_timer { u64 expires; };
 TIMERTYPE
 struct cpumask { unsigned bits; };
 struct task_struct {
-    unsigned id, cpu;
+    unsigned id, cpu, policy;
     struct cpumask *cpus_ptr;
     struct { u64 slice, flags, dsq_vtime; } scx;
     struct { u64 sum_exec_runtime; } se;
 };
 static struct task_state states[4];
+static struct task_struct *cpu_current;
+#define bpf_ksym_exists(fn) true
+static void bpf_rcu_read_lock(void) {}
+static void bpf_rcu_read_unlock(void) {}
+static struct task_struct *scx_bpf_cpu_curr(s32 cpu) { (void)cpu; return cpu_current; }
 static struct fresh_task_hint hints[4];
 static struct background_server servers[2];
 static struct background_timer timers[2];
@@ -156,6 +161,40 @@ static void execute(struct task_struct *p, u64 cpu, u64 wall) {
 '''
 
 CASES = {
+    "deadline_wakeup_preempts_only_later_eligible_deadline": r'''
+        reset(); struct task_struct arrival={}, owner={.id=1, .policy=7};
+        cpu_current=&owner;
+        hints[0].class_id=hints[1].class_id=FRESH_CLASS_DEADLINE;
+        hints[0].deadline_ts_ns=1500; hints[1].deadline_ts_ns=1600;
+        states[1].last_job_id=1;
+        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP);
+        assert(kicks==1 && destination==DSQ_DEADLINE);
+        kicks=0; scx_fresh_enqueue(&arrival, 0); assert(!kicks);
+        hints[1].deadline_ts_ns=1500;
+        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(!kicks);
+        hints[1].deadline_ts_ns=1400;
+        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(!kicks);
+        hints[1].deadline_ts_ns=1600;
+        hints[0].deadline_ts_ns=0;
+        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(!kicks);
+        hints[0].deadline_ts_ns=1500; hints[1].deadline_ts_ns=0;
+        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(!kicks);
+        hints[1].deadline_ts_ns=1600;
+        hints[1].class_id=FRESH_CLASS_URGENT;
+        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(!kicks);
+        hints[1].class_id=FRESH_CLASS_BACKGROUND;
+        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(!kicks);
+        hints[1].class_id=FRESH_CLASS_DEADLINE; states[1].overrun=true;
+        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(!kicks);
+        states[1].overrun=false; states[1].background_queued=true;
+        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(!kicks);
+        states[1].background_queued=false; owner.policy=0;
+        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(!kicks);
+        owner.policy=7; hints[1].job_id=2;
+        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(!kicks);
+        cpu_current=NULL;
+        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(!kicks);
+    ''',
     "successive_jobs_rejoin_background_without_refilling_server": r'''
         struct task_struct native={}, deadline={.id=1}; reset();
         hints[1].class_id=FRESH_CLASS_DEADLINE; hints[1].budget_ns=5;
@@ -553,6 +592,7 @@ class BackgroundServerTests(unittest.TestCase):
             "background_timer_expired", "arm_background_timer", "disarm_background_timer",
             "background_for_cpu", "background_dsq", "enqueue_background", "account_background",
             "deadline_waiting_on", "background_prefer_previous", "keep_background",
+            "preempt_later_deadline",
             "scx_fresh_enqueue", "scx_fresh_dispatch", "scx_fresh_running", "scx_fresh_stopping")))
         program += "\nint main(int argc, char **argv) { assert(argc==2);\n"
         for name, body in CASES.items():

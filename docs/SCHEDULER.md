@@ -24,8 +24,24 @@ Urgent -> Deadline -> Background
 ```
 
 Moving one task avoids queuing a batch of lower-priority tasks ahead of a later
-arrival. Only the default Urgent wakeup path preempts. Deadline arrival does not shorten
-a running Background slice.
+arrival. Urgent retains its wakeup preemption. A Deadline wakeup requests a
+reschedule only when the current task is an eligible Deadline owner with a
+strictly later effective deadline. The arrival stays in the Deadline DSQ;
+normal dispatch precedence still applies. Deadline never deliberately targets
+Urgent, native Background, or budget-demoted Deadline workers for preemption.
+
+Both jobs must supply a deadline or a release-plus-freshness bound. Equal keys,
+missing bounds, non-wakeup enqueues and a mismatched current job identity do not
+trigger this request. This uses `scx_bpf_cpu_curr` under RCU; kernels without
+that helper retain dispatch-only Deadline ordering. A remote CPU can change
+owners between inspection and the kick, so the kick is a scheduling request,
+not an atomic promise to displace a particular worker.
+
+The focused loaded probe passed three trials: an earlier-deadline worker woke
+3 ms into a 20 ms Deadline callback and started after 69, 74 and 68 microseconds,
+before that callback completed. The server and BE cap were disabled. The loaded
+Background-server regression also passes. These checks establish the mechanism;
+application latency still needs separate validation.
 
 ## Optional Background server
 
@@ -55,7 +71,7 @@ the remaining delta. The kernel can call dispatch before stopping. Charging
 only in stopping would let the next worker consume an allocation that was
 already spent. Spare-capacity execution is charged too. Once Q is exhausted, Background
 is chosen only when Urgent and Deadline supply no runnable task. This is a
-dispatch rule: Deadline wakeups still do not preempt an executing slice.
+dispatch rule: Deadline wakeups do not preempt a running Background worker.
 Server replenishment neither clears job overrun nor resets job CPU accounting.
 
 At `running`, Background's slice is bounded by any remaining allocation.

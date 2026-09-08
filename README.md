@@ -11,8 +11,10 @@ interpreted as service requests.
 Expiry and cancellation belong to the application; elapsed time bounds never
 demote a worker. An optional per-CPU Background server shares an allocation
 between native Background and budget-demoted Deadline workers. It remains
-subordinate to Urgent and is disabled by default. Same-class Deadline wakeup
-preemption is not implemented.
+subordinate to Urgent and is disabled by default. An earlier effective deadline
+can preempt a running eligible Deadline worker on wakeup; Urgent and Background
+workers are excluded from this comparison. See the kernel requirements and
+validation limits in [scheduler rules](docs/SCHEDULER.md).
 
 ## Build and test
 
