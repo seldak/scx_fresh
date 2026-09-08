@@ -85,6 +85,33 @@ application stage; it does not change that stage's service.
 `--print-config` reports `expiry_policy=application`. The removed
 `--deadline-grace-us` option is rejected rather than silently ignored.
 
+## Deadline contention probe
+
+Build and run the focused multi-worker check:
+
+```bash
+make build/deadline_contention
+sudo python3 scripts/test_deadline_contention.py --cpu 14 --housekeeping-cpu 1
+```
+
+The first cell releases earlier, equal and later Deadline jobs during a 20 ms
+owner. The second adds Urgent, Background and a budget-limited Deadline worker,
+with the Background server set to 2 ms / 10 ms. Each worker publishes three
+successive jobs. The probe records CPU time, start delay and completion order;
+it checks complete work, earlier-deadline preemption in the first cell, Urgent
+response and Background overlap in the second, and demotion of each budgeted
+job. Equal deadlines have no asserted FIFO completion order. The budgeted
+worker requests a 1 ms slice so its 6 ms job exercises re-enqueue demotion.
+No scheduler policy changes are made by this test.
+
+Loaded validation passed all three rounds in both cells on the isolated test
+CPU. Deadline-only earlier arrivals started within 68–84 microseconds; mixed-cell
+Urgent arrivals started within 60–63 microseconds. Every worker completed its
+requested CPU work, native Background started before the Deadline owner finished,
+and the budgeted worker emitted a demotion for each of its three jobs. Equal-deadline
+completion order varied, as permitted. These finite tests do not establish a
+schedulability guarantee or a bound on worst-case response time.
+
 ## Build configuration
 
 The focused Deadline preemption probe uses a 20ms Deadline callback and wakes

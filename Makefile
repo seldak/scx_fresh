@@ -23,6 +23,9 @@ $(BUILD_DIR)/background_workload: tests/background_workload.c $(BUILD_DIR)/libfr
 $(BUILD_DIR)/deadline_workload: tests/deadline_workload.c $(BUILD_DIR)/libfreshqos.a $(CLIENT_HEADERS)
 	$(CC) -O2 -g -Wall -Wextra -Werror -Iinclude -Isrc $< $(BUILD_DIR)/libfreshqos.a -lbpf -lpthread -o $@
 
+$(BUILD_DIR)/deadline_contention: tests/deadline_contention.c $(BUILD_DIR)/libfreshqos.a $(CLIENT_HEADERS)
+	$(CC) -O2 -g -Wall -Wextra -Werror -Iinclude -Isrc $< $(BUILD_DIR)/libfreshqos.a -lbpf -lpthread -o $@
+
 $(BUILD_DIR):
 	mkdir -p "$@"
 
@@ -44,7 +47,11 @@ $(BUILD_DIR)/libfreshqos.a: $(BUILD_DIR)/freshqos.o
 $(BUILD_DIR)/scx_fresh: src/scx_fresh_user.c bpf/background_server.h $(SKEL_H) $(BUILD_DIR)/libfreshqos.a $(CLIENT_HEADERS)
 	$(CC) -O2 -g -I$(BUILD_DIR) -Iinclude -Isrc $< $(BUILD_DIR)/libfreshqos.a -lbpf -lelf -lz -o $@
 
-test: test-scheduler-mode test-slice test-classes test-background
+test: test-scheduler-mode test-slice test-classes test-background test-contention
+
+.PHONY: test-contention
+test-contention:
+	$(PYTHON) tests/test_deadline_contention.py
 
 .PHONY: test-background
 test-background:
