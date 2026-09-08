@@ -12,7 +12,7 @@ make test
 ```
 
 The default flags are `0x8` (partial switch). `make test` runs loader
-configuration, slice and service-class tests without attaching a scheduler.
+configuration, slice, service-class and Background-server tests without attachment.
 Generated kernel type declarations may produce compiler warnings on some kernels.
 
 `make client` builds only the optional MIT client library. Its public header is

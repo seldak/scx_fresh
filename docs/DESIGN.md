@@ -25,7 +25,7 @@ estimates are optional ways to derive it, not requirements of the hint interface
 Dropping queued work does not imply permission to interrupt a running callback;
 the runtime remains responsible for its message, resource and completion lifetimes.
 
-## Service model under design
+## Service model and remaining gaps
 
 A service class describes configured CPU treatment, independent of application
 function. It is a policy inside SCHED_EXT, not another Linux scheduling class.
@@ -98,7 +98,8 @@ control who may publish hints; per-worker class authorization is not implemented
 
 Generic class selection and application-owned expiry are implemented. Same-class
 deadline preemption and class permissions remain future changes. The optional
-Background server requires loaded validation before making service claims.
+Background server has passed the focused loaded allocation and progress probe;
+those finite-window checks do not establish a hard reservation.
 The hint and scheduler references describe the current ABI and routing rules.
 
 ## Limits

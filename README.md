@@ -5,12 +5,14 @@ classes and per-job timing hints.
 
 Applications select Urgent, Deadline or Background service explicitly. Stage
 identity is diagnostic and never selects a queue. The version 3 hint ABI requires
-clients and scheduler to be rebuilt together; it does not interpret old
-older-version hints as service requests.
+clients and scheduler to use matching headers; older-version hints are not
+interpreted as service requests.
 
 Expiry and cancellation belong to the application; elapsed time bounds never
-demote a worker. Same-class deadline preemption and replenished service
-allocations remain design work, not implemented guarantees.
+demote a worker. An optional per-CPU Background server shares an allocation
+between native Background and budget-demoted Deadline workers. It remains
+subordinate to Urgent and is disabled by default. Same-class Deadline wakeup
+preemption is not implemented.
 
 ## Build and test
 
