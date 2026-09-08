@@ -156,6 +156,59 @@ static void execute(struct task_struct *p, u64 cpu, u64 wall) {
 '''
 
 CASES = {
+    "successive_jobs_rejoin_background_without_refilling_server": r'''
+        struct task_struct native={}, deadline={.id=1}; reset();
+        hints[1].class_id=FRESH_CLASS_DEADLINE; hints[1].budget_ns=5;
+        for (unsigned job=1; job<=8; job++) {
+            now=1000+(job-1)*100;
+            hints[1].job_id=job;
+            scx_fresh_enqueue(&native, 0); execute(&native, 10, 10);
+            u64 remaining=servers[0].remaining;
+            u64 native_vtime=states[0].background_vruntime;
+            assert(remaining==10);
+            scx_fresh_enqueue(&deadline, 0);
+            assert(destination==DSQ_DEADLINE && !states[1].overrun);
+            assert(!states[1].background_member && states[1].exec_ns_in_job==0);
+            assert(servers[0].remaining==remaining);
+            execute(&deadline, 8, 8);
+            assert(states[1].overrun && servers[0].remaining==remaining);
+            u64 join=servers[0].vtime;
+            scx_fresh_enqueue(&deadline, 0);
+            assert(destination==background_dsq(0) && inserted_order==join);
+            execute(&deadline, 5, 5);
+            assert(states[1].overrun && states[1].exec_ns_in_job==13);
+            assert(servers[0].remaining==5);
+            assert(states[0].background_vruntime==native_vtime);
+            assert(servers[0].native_cpu_ns==job*10);
+            assert(servers[0].demoted_cpu_ns==job*5);
+        }
+    ''',
+    "repeated_urgent_bursts_cross_periods_without_spending_background": r'''
+        struct task_struct background={}, urgent={.id=1}; reset();
+        hints[1].class_id=FRESH_CLASS_URGENT; hints[1].budget_ns=1;
+        for (unsigned burst=1; burst<=8; burst++) {
+            now=1000+(burst-1)*300;
+            scx_fresh_enqueue(&background, 0); execute(&background, 5, 5);
+            u64 charged=servers[0].cpu_ns;
+            u64 fairness=states[0].background_vruntime;
+            hints[1].job_id=burst;
+            scx_fresh_enqueue(&urgent, SCX_ENQ_WAKEUP);
+            assert(destination==SCX_DSQ_LOCAL);
+            execute(&urgent, 120, 120);
+            assert(!timers[0].active);
+            assert(servers[0].cpu_ns==charged);
+            assert(states[0].background_vruntime==fairness);
+            scx_fresh_enqueue(&urgent, SCX_ENQ_WAKEUP);
+            assert(destination==SCX_DSQ_LOCAL); // Urgent remains exempt from demotion.
+            scx_fresh_enqueue(&background, 0); scx_fresh_running(&background);
+            assert(servers[0].remaining==20); // Missed allocation does not accumulate.
+            assert(background.scx.slice==20 && timers[0].active);
+            background.se.sum_exec_runtime+=20; now+=20;
+            scx_fresh_stopping(&background, true);
+            assert(servers[0].cpu_ns==burst*25 && !servers[0].remaining);
+            assert(!servers[0].debt_ns && !servers[1].cpu_ns);
+        }
+    ''',
     "timer_failure_reports_nonnull_diagnostic": r'''
         reset(); struct task_struct p={.scx.slice=20}; u32 cpu=0;
         timer_error=-22;
