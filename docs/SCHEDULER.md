@@ -27,8 +27,10 @@ Moving one task avoids queuing a batch of lower-priority tasks ahead of a later
 arrival. Urgent retains its wakeup preemption. A Deadline wakeup requests a
 reschedule only when the current task is an eligible Deadline owner with a
 strictly later effective deadline. The arrival stays in the Deadline DSQ;
-normal dispatch precedence still applies. Deadline never deliberately targets
-Urgent, native Background, or budget-demoted Deadline workers for preemption.
+normal dispatch precedence still applies. Deadline wakeups also request
+preemption of native or demoted Background service unless that worker is
+executing under a still-funded protected Background grant. Urgent and foreign
+scheduling classes are never targeted.
 
 Both jobs must supply a deadline or a release-plus-freshness bound. Equal keys,
 missing bounds, non-wakeup enqueues and a mismatched current job identity do not
@@ -79,7 +81,7 @@ the remaining delta. The kernel can call dispatch before stopping. Charging
 only in stopping would let the next worker consume an allocation that was
 already spent. Spare-capacity execution is charged too. Once Q is exhausted, Background
 is chosen only when Urgent and Deadline supply no runnable task. This is a
-dispatch rule: Deadline wakeups do not preempt a running Background worker.
+dispatch rule: Deadline wakeups can preempt unprotected Background service.
 Server replenishment neither clears job overrun nor resets job CPU accounting.
 
 At `running`, Background's slice is bounded by any remaining allocation.
@@ -120,10 +122,11 @@ deficit. Migration preserves positive debt relative to the destination pool.
 Background queues are CPU-specific and are not work-stolen by other CPUs;
 normal CPU selection still applies on wakeup. Pin workers for allocation tests.
 
-The runnable previous task is not yet in a DSQ during dispatch. It participates
-in class precedence explicitly: queued same-class work is considered first,
-then an eligible previous Urgent/Deadline task is retained before considering
-lower service. A budget-exhausted previous Deadline worker yields so stopping
+The runnable previous task is not yet in a DSQ during dispatch. Deadline compares
+its effective deadline with the first CPU-eligible queued Deadline job; the
+earlier job wins and equal keys yield to the queued peer. Queued Urgent work
+is considered before a previous Urgent worker. Both classes precede lower
+service, except for funded Background allocation. A budget-exhausted previous Deadline worker yields so stopping
 and enqueue can enforce demotion. This also corrects the disabled policy's
 former rotation into Background when its only Deadline worker was current.
 For Background, the current worker competes against the first ordered DSQ
@@ -144,8 +147,9 @@ release. Future release times do not underflow.
 
 Within Urgent and Deadline queues, the effective deadline is the earliest available
 value among `deadline_ts_ns` and `release_ts_ns + stale_ns`. The latter is
-used only when both fields are nonzero. With neither bound, the key is the
-current time. This is deadline ordering, not newest-message selection.
+used only when both fields are nonzero and the sum does not overflow. Only
+Urgent may omit both bounds and use current time; invalid Deadline hints receive
+Background service. This is deadline ordering, not newest-message selection.
 
 ## Execution budgets
 
@@ -153,8 +157,10 @@ BPF stores execution accounting per worker. A new `job_id` resets the job's
 execution total and overrun state at enqueue. `running` also establishes job
 identity because enrollment may run a task before its first enqueue; otherwise
 that first enqueue could discard execution already charged to the job.
-At `stopping`, elapsed running time is added to `exec_ns_in_job` and the legacy
-`vruntime`. The enabled server uses separate Background-only CPU accounting.
+At `stopping`, the delta of `se.sum_exec_runtime` is added to `exec_ns_in_job`
+and the legacy `vruntime`. Interrupt wall time is not charged as job execution.
+Dispatch uses that same counter when checking a current worker's budget.
+The enabled server uses separate Background-only CPU accounting.
 
 When execution exceeds a nonzero budget, the scheduler marks the job overrun
 and emits a budget-overrun event. A later enqueue sends overrun Deadline work to Background

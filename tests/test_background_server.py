@@ -115,7 +115,7 @@ static u64 task_pid_tgid(struct task_struct *p) { return p->id; }
 static u32 scx_bpf_task_cpu(struct task_struct *p) { return p->cpu; }
 static struct task_state *get_state(u64 key) { return &states[key]; }
 #define trace_urgent_enqueue(...) ((void)0)
-#define execution_callback(...) ((void)0)
+#define execution_callback(p, event, runnable, delta) ((void)(delta))
 #define emit_evt(...) ((void)0)
 static void scx_insert(struct task_struct *p, u64 dsq, u64 slice, u64 flags) {
     destination=dsq; inserted_slice=slice; p->scx.slice=slice;
@@ -161,6 +161,34 @@ static void execute(struct task_struct *p, u64 cpu, u64 wall) {
 '''
 
 CASES = {
+    "deadline_previous_competes_by_deadline": r'''
+        for (unsigned enabled=0; enabled<2; enabled++) {
+            reset(); background_period_ns=enabled?100:0; background_ready=false;
+            struct task_struct p={.scx.flags=SCX_TASK_QUEUED};
+            hints[0].class_id=FRESH_CLASS_DEADLINE; hints[0].deadline_ts_ns=1500;
+            deadline_head.scx.dsq_vtime=1600; moved=0;
+            scx_fresh_dispatch(0,&p); assert(!moved && p.scx.slice);
+            deadline_head.scx.dsq_vtime=1400; moved=0;
+            scx_fresh_dispatch(0,&p); assert(moved==DSQ_DEADLINE);
+            deadline_head.scx.dsq_vtime=1500; moved=0;
+            scx_fresh_dispatch(0,&p); assert(moved==DSQ_DEADLINE);
+        }
+    ''',
+    "job_budget_excludes_interrupt_wall_time": r'''
+        reset(); struct task_struct p={};
+        hints[0].class_id=FRESH_CLASS_DEADLINE; hints[0].budget_ns=10;
+        execute(&p,4,1000); assert(states[0].exec_ns_in_job==4 && !states[0].overrun);
+        execute(&p,7,1000); assert(states[0].exec_ns_in_job==11 && states[0].overrun);
+    ''',
+    "funded_background_is_not_preempted": r'''
+        reset(); struct task_struct arrival={}, owner={.id=1,.policy=7}; cpu_current=&owner;
+        hints[0].class_id=FRESH_CLASS_DEADLINE;
+        states[1].background_queued=true; states[1].background_protected=true;
+        servers[0].remaining=20; servers[0].period_start=now;
+        scx_fresh_enqueue(&arrival,SCX_ENQ_WAKEUP); assert(kicks==0);
+        servers[0].remaining=0;
+        scx_fresh_enqueue(&arrival,SCX_ENQ_WAKEUP); assert(kicks==1);
+    ''',
     "deadline_wakeup_preempts_only_later_eligible_deadline": r'''
         reset(); struct task_struct arrival={}, owner={.id=1, .policy=7};
         cpu_current=&owner;
@@ -178,16 +206,18 @@ CASES = {
         hints[0].deadline_ts_ns=0;
         scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(!kicks);
         hints[0].deadline_ts_ns=1500; hints[1].deadline_ts_ns=0;
-        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(!kicks);
+        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(kicks==1); kicks=0;
         hints[1].deadline_ts_ns=1600;
         hints[1].class_id=FRESH_CLASS_URGENT;
+        states[1].overrun=true;
         scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(!kicks);
+        states[1].overrun=false;
         hints[1].class_id=FRESH_CLASS_BACKGROUND;
-        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(!kicks);
+        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(kicks==1); kicks=0;
         hints[1].class_id=FRESH_CLASS_DEADLINE; states[1].overrun=true;
-        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(!kicks);
+        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(kicks==1); kicks=0;
         states[1].overrun=false; states[1].background_queued=true;
-        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(!kicks);
+        scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(kicks==1); kicks=0;
         states[1].background_queued=false; owner.policy=0;
         scx_fresh_enqueue(&arrival, SCX_ENQ_WAKEUP); assert(!kicks);
         owner.policy=7; hints[1].job_id=2;
@@ -479,8 +509,8 @@ CASES = {
         scx_fresh_enqueue(&p, 0); execute(&p, 15, 15);
         assert(!servers[0].remaining && servers[0].cpu_ns==20);
         scx_fresh_dispatch(0, &p); assert(moved==DSQ_DEADLINE);
-        // Budget accounting is unchanged, even though server uses CPU runtime.
-        assert(states[0].exec_ns_in_job==23);
+        // Both job and server accounting exclude the three interrupt-time units.
+        assert(states[0].exec_ns_in_job==20);
     ''',
     "slice_bounds_and_period_replenishment": r'''
         struct task_struct p={}; reset();
@@ -591,7 +621,7 @@ class BackgroundServerTests(unittest.TestCase):
             "get_hint", "sync_job", "safe_age_ns", "effective_deadline_ns", "enqueue_slice_ns",
             "background_timer_expired", "arm_background_timer", "disarm_background_timer",
             "background_for_cpu", "background_dsq", "enqueue_background", "account_background",
-            "deadline_waiting_on", "background_prefer_previous", "keep_background",
+            "deadline_waiting_on", "background_prefer_previous", "deadline_prefer_previous", "keep_background",
             "preempt_later_deadline",
             "scx_fresh_enqueue", "scx_fresh_dispatch", "scx_fresh_running", "scx_fresh_stopping")))
         program += "\nint main(int argc, char **argv) { assert(argc==2);\n"

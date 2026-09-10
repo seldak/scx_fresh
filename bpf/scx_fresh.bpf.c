@@ -174,6 +174,7 @@ struct task_state {
     u64 last_start_ns;
 
     u64 exec_ns_in_job;
+    u64 job_exec_start;
     u64 last_job_id;
     u8  overrun; /* budget exceeded for current job */
 
@@ -628,7 +629,7 @@ static __always_inline void trace_urgent_enqueue(struct task_struct *p,
     bpf_ringbuf_submit(e, 0);
 }
 
-/* Only an eligible Deadline owner may be displaced by another Deadline job.
+/* Deadline arrivals may displace later Deadline or unprotected Background.
  * Keep the arrival in its DSQ so dispatch still honors Urgent and the server.
  */
 static __always_inline void preempt_later_deadline(struct task_struct *p, u64 deadline)
@@ -642,6 +643,15 @@ static __always_inline void preempt_later_deadline(struct task_struct *p, u64 de
         u64 key = task_pid_tgid(current);
         struct task_state *st = get_state(key);
         struct fresh_task_hint *h = get_hint(key);
+        struct background_server *s = background_for_cpu(cpu);
+        bool background = !h || h->class_id == FRESH_CLASS_BACKGROUND ||
+                          (h->class_id == FRESH_CLASS_DEADLINE && st &&
+                           (st->overrun || st->background_queued));
+        bool protected = background_period_ns && s && st &&
+                         st->background_protected && s->remaining &&
+                         scx_now_ns() - s->period_start < background_period_ns;
+        if (background && !protected)
+            scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
         if (st && h && h->class_id == FRESH_CLASS_DEADLINE &&
             !st->overrun && !st->background_queued &&
             st->last_job_id == h->job_id &&
@@ -785,6 +795,23 @@ static __always_inline bool background_prefer_previous(u64 dsq, struct task_stat
     return prefer;
 }
 
+/* prev is not in the DSQ yet. Compare it with the first CPU-eligible peer. */
+static __always_inline bool deadline_prefer_previous(s32 cpu, u64 deadline)
+{
+    struct bpf_iter_scx_dsq it;
+    struct task_struct *p;
+    bool prefer = true;
+    bpf_iter_scx_dsq_new(&it, DSQ_DEADLINE, 0);
+    while ((p = bpf_iter_scx_dsq_next(&it))) {
+        if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+            prefer = deadline < BPF_CORE_READ(p, scx.dsq_vtime);
+            break;
+        }
+    }
+    bpf_iter_scx_dsq_destroy(&it);
+    return prefer;
+}
+
 static __always_inline void keep_background(struct task_struct *p, struct task_state *st,
                                             struct background_server *s, bool protected)
 {
@@ -811,7 +838,7 @@ void BPF_STRUCT_OPS(scx_fresh_dispatch, s32 cpu, struct task_struct *prev)
      * must yield once so stopping/enqueue can perform that transition.
      */
     if (deadline && ph->budget_ns && pst->last_start_ns &&
-        pst->exec_ns_in_job + scx_now_ns() - pst->last_start_ns > ph->budget_ns)
+        pst->exec_ns_in_job + BPF_CORE_READ(prev, se.sum_exec_runtime) - pst->job_exec_start > ph->budget_ns)
         deadline = false;
 
     /* Move one task per callback. Pre-filling the local DSQ with lower lanes
@@ -843,7 +870,8 @@ void BPF_STRUCT_OPS(scx_fresh_dispatch, s32 cpu, struct task_struct *prev)
                 }
             }
         }
-        if (scx_move_to_local(DSQ_DEADLINE))
+        if ((!deadline || !deadline_prefer_previous(cpu, effective_deadline_ns(ph, scx_now_ns()))) &&
+            scx_move_to_local(DSQ_DEADLINE))
             return;
         if (deadline) {
             prev->scx.slice = enqueue_slice_ns(ph);
@@ -862,7 +890,8 @@ void BPF_STRUCT_OPS(scx_fresh_dispatch, s32 cpu, struct task_struct *prev)
             pst->background_protected = false;
         return;
     }
-    if (scx_move_to_local(DSQ_DEADLINE))
+    if ((!deadline || !deadline_prefer_previous(cpu, effective_deadline_ns(ph, scx_now_ns()))) &&
+        scx_move_to_local(DSQ_DEADLINE))
         return;
     if (deadline) {
         prev->scx.slice = enqueue_slice_ns(ph);
@@ -879,6 +908,7 @@ void BPF_STRUCT_OPS(scx_fresh_running, struct task_struct *p)
         return;
 
     st->last_start_ns = scx_now_ns();
+    st->job_exec_start = BPF_CORE_READ(p, se.sum_exec_runtime);
     /* Enrollment can reach running before enqueue. Establish identity now
      * so the first later enqueue cannot erase already-executed job time.
      */
@@ -935,8 +965,9 @@ void BPF_STRUCT_OPS(scx_fresh_stopping, struct task_struct *p, bool runnable)
     u64 delta = now_ns - st->last_start_ns;
     execution_callback(p, FRESH_EXEC_STOPPING, runnable, delta);
 
-    st->exec_ns_in_job += delta;
-    st->vruntime += delta;
+    u64 cpu_delta = BPF_CORE_READ(p, se.sum_exec_runtime) - st->job_exec_start;
+    st->exec_ns_in_job += cpu_delta;
+    st->vruntime += cpu_delta;
     account_background(p, st, now_ns);
 
     /* Budget demotion: if exec exceeds budget, mark overrun for this job. */

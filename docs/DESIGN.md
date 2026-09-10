@@ -33,7 +33,9 @@ Class precedence expresses the architect's priorities. Within a deadline-ordered
 class, an earlier-deadline job should preempt a later-deadline job when they
 compete for the same CPU. Hints must not bypass configured class permissions or
 resource limits. Deadline wakeups now request preemption when their explicit
-effective deadline is earlier than the running eligible Deadline job's.
+effective deadline is earlier than the running eligible Deadline job's, or when
+the current worker is receiving unprotected Background service. Dispatch also
+compares the current Deadline worker against queued Deadline work.
 
 Ownership, job budgets and service classes are separate concepts. Ownership
 protects the selected-work lifecycle; it does not grant unlimited CPU service.
