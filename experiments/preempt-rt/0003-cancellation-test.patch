@@ -1,0 +1,244 @@
+diff --git a/tools/testing/selftests/bpf/progs/timer_cancel_rt.c b/tools/testing/selftests/bpf/progs/timer_cancel_rt.c
+new file mode 100644
+index 000000000..f80908819
+--- /dev/null
++++ b/tools/testing/selftests/bpf/progs/timer_cancel_rt.c
+@@ -0,0 +1,118 @@
++// SPDX-License-Identifier: GPL-2.0
++#include <linux/bpf.h>
++#include <errno.h>
++#include <stdbool.h>
++#include <bpf/bpf_helpers.h>
++
++extern void bpf_preempt_disable(void) __ksym;
++extern void bpf_preempt_enable(void) __ksym;
++extern bool CONFIG_PREEMPT_RT __kconfig __weak;
++
++struct timer_value {
++	struct bpf_timer timer;
++};
++
++struct {
++	__uint(type, BPF_MAP_TYPE_ARRAY);
++	__uint(max_entries, 1);
++	__type(key, int);
++	__type(value, struct timer_value);
++} timers SEC(".maps");
++
++const volatile bool disable_preemption;
++__u64 callback_start;
++__u64 callback_end;
++__u64 cancel_start;
++__u64 cancel_end;
++__u32 callback_cpu;
++__u32 cancel_cpu;
++int overlap;
++int cancel_result;
++bool rejection_expected;
++int rearm_result;
++int retry_result;
++
++static int wait_for_cancel(__u32 index, void *ctx)
++{
++	__u64 now = bpf_ktime_get_ns();
++	__u64 start = __sync_fetch_and_add(&cancel_start, 0);
++
++	/* Never wait indefinitely if the userspace trigger fails to arrive. */
++	if (now - callback_start >= 100000000)
++		return 1;
++	/* Give the remote cancellation time to reach hrtimer_cancel(). */
++	if (start && now - start >= 2000000)
++		return 1;
++	return 0;
++}
++
++static int timer_callback(void *map, int *key, struct timer_value *value)
++{
++	callback_cpu = bpf_get_smp_processor_id();
++	__sync_lock_test_and_set(&callback_start, bpf_ktime_get_ns());
++	bpf_loop(1000000, wait_for_cancel, NULL, 0);
++	__sync_lock_test_and_set(&callback_end, bpf_ktime_get_ns());
++	return 0;
++}
++
++SEC("syscall")
++int arm_timer(void *ctx)
++{
++	struct timer_value *value;
++	int key = 0;
++	int err;
++
++	value = bpf_map_lookup_elem(&timers, &key);
++	if (!value)
++		return -ENOENT;
++	err = bpf_timer_init(&value->timer, &timers, 1 /* CLOCK_MONOTONIC */);
++	if (err)
++		return err;
++	err = bpf_timer_set_callback(&value->timer, timer_callback);
++	if (err)
++		return err;
++	/* Allow the test runner to migrate before the callback occupies this CPU.
++	 * The userspace overlap assertion still rejects a missed rendezvous.
++	 */
++	return bpf_timer_start(&value->timer, 50000000, BPF_F_TIMER_CPU_PIN);
++}
++
++SEC("syscall")
++int cancel_timer(void *ctx)
++{
++	struct timer_value *value;
++	int key = 0;
++
++	value = bpf_map_lookup_elem(&timers, &key);
++	if (!value)
++		return -ENOENT;
++	if (disable_preemption)
++		bpf_preempt_disable();
++	rejection_expected = CONFIG_PREEMPT_RT && disable_preemption;
++	cancel_cpu = bpf_get_smp_processor_id();
++	overlap = __sync_fetch_and_add(&callback_start, 0) &&
++		  !__sync_fetch_and_add(&callback_end, 0);
++	__sync_lock_test_and_set(&cancel_start, bpf_ktime_get_ns());
++	cancel_result = bpf_timer_cancel(&value->timer);
++	__sync_lock_test_and_set(&cancel_end, bpf_ktime_get_ns());
++	if (disable_preemption)
++		bpf_preempt_enable();
++	return 0;
++}
++
++SEC("syscall")
++int check_timer_usable(void *ctx)
++{
++	struct timer_value *value;
++	int key = 0;
++
++	value = bpf_map_lookup_elem(&timers, &key);
++	if (!value)
++		return -ENOENT;
++	/* A rejected cancellation must leave the callback installed. */
++	rearm_result = bpf_timer_start(&value->timer, 1000000000, 0);
++	retry_result = bpf_timer_cancel(&value->timer);
++	return 0;
++}
++
++char LICENSE[] SEC("license") = "GPL";
+diff --git a/tools/testing/selftests/bpf/prog_tests/timer_cancel_rt.c b/tools/testing/selftests/bpf/prog_tests/timer_cancel_rt.c
+new file mode 100644
+index 000000000..99ecf990a
+--- /dev/null
++++ b/tools/testing/selftests/bpf/prog_tests/timer_cancel_rt.c
+@@ -0,0 +1,114 @@
++// SPDX-License-Identifier: GPL-2.0
++#define _GNU_SOURCE
++#include <sched.h>
++#include <time.h>
++#include <test_progs.h>
++#include "timer_cancel_rt.skel.h"
++
++static int pin_cpu(int cpu)
++{
++	cpu_set_t set;
++
++	CPU_ZERO(&set);
++	CPU_SET(cpu, &set);
++	return sched_setaffinity(0, sizeof(set), &set);
++}
++
++static void run_cancel_case(int timer_cpu, int caller_cpu, bool atomic)
++{
++	struct timer_cancel_rt *skel;
++	LIBBPF_OPTS(bpf_test_run_opts, opts);
++	struct timespec start, now;
++	int err;
++
++	skel = timer_cancel_rt__open();
++	if (!ASSERT_OK_PTR(skel, "open"))
++		return;
++	skel->rodata->disable_preemption = atomic;
++	err = timer_cancel_rt__load(skel);
++	/* A verifier rejection is not evidence about cancellation behavior. */
++	if (!ASSERT_OK(err, "load_requires_diagnostic_kernel"))
++		goto out;
++	if (!ASSERT_OK(pin_cpu(timer_cpu), "pin_timer_cpu"))
++		goto out;
++	err = bpf_prog_test_run_opts(bpf_program__fd(skel->progs.arm_timer), &opts);
++	if (!ASSERT_OK(err, "arm_test_run") || !ASSERT_OK(opts.retval, "arm_result"))
++		goto out;
++	if (!ASSERT_OK(pin_cpu(caller_cpu), "pin_caller_cpu"))
++		goto out;
++	clock_gettime(CLOCK_MONOTONIC, &start);
++	/* Stay runnable on the caller CPU: a delayed sleep wakeup can miss
++	 * the entire bounded callback and invalidate the overlap test.
++	 */
++	while (!__atomic_load_n(&skel->bss->callback_start, __ATOMIC_RELAXED)) {
++		clock_gettime(CLOCK_MONOTONIC, &now);
++		if (now.tv_sec - start.tv_sec >= 2) {
++			ASSERT_TRUE(false, "inconclusive_callback_did_not_start");
++			goto out;
++		}
++	}
++	/* syscall test-run rejects duration populated by other program types. */
++	memset(&opts, 0, sizeof(opts));
++	opts.sz = sizeof(opts);
++	err = bpf_prog_test_run_opts(bpf_program__fd(skel->progs.cancel_timer), &opts);
++	if (!ASSERT_OK(err, "cancel_test_run") || !ASSERT_OK(opts.retval, "cancel_result"))
++		goto out;
++	printf("atomic=%d overlap=%d timer_cpu=%u cancel_cpu=%u result=%d "
++	       "callback_start=%llu callback_end=%llu cancel_start=%llu cancel_end=%llu\n",
++	       atomic, skel->bss->overlap, skel->bss->callback_cpu,
++	       skel->bss->cancel_cpu, skel->bss->cancel_result,
++	       skel->bss->callback_start, skel->bss->callback_end,
++	       skel->bss->cancel_start, skel->bss->cancel_end);
++	ASSERT_EQ(skel->bss->callback_cpu, timer_cpu, "timer_cpu");
++	ASSERT_EQ(skel->bss->cancel_cpu, caller_cpu, "caller_cpu");
++	ASSERT_EQ(skel->bss->overlap, 1, "inconclusive_without_overlap");
++	if (skel->bss->rejection_expected) {
++		if (!ASSERT_EQ(skel->bss->cancel_result, -EOPNOTSUPP, "atomic_cancel_rejected"))
++			goto out;
++		clock_gettime(CLOCK_MONOTONIC, &start);
++		while (!__atomic_load_n(&skel->bss->callback_end, __ATOMIC_RELAXED)) {
++			clock_gettime(CLOCK_MONOTONIC, &now);
++			if (now.tv_sec - start.tv_sec >= 2) {
++				ASSERT_TRUE(false, "callback_did_not_finish");
++				goto out;
++			}
++			usleep(100);
++		}
++		memset(&opts, 0, sizeof(opts));
++		opts.sz = sizeof(opts);
++		err = bpf_prog_test_run_opts(bpf_program__fd(skel->progs.check_timer_usable),
++					     &opts);
++		if (!ASSERT_OK(err, "reuse_test_run") || !ASSERT_OK(opts.retval, "reuse_result"))
++			goto out;
++		ASSERT_OK(skel->bss->rearm_result, "rejected_cancel_preserved_callback");
++		ASSERT_GE(skel->bss->retry_result, 0, "preemptible_retry");
++		goto out;
++	}
++	ASSERT_GE(skel->bss->cancel_result, 0, "synchronous_cancel_result");
++	ASSERT_GT(skel->bss->callback_end, skel->bss->cancel_start, "callback_overlap");
++	ASSERT_GE(skel->bss->cancel_end, skel->bss->callback_end, "callback_finished");
++out:
++	timer_cancel_rt__destroy(skel);
++}
++
++void serial_test_timer_cancel_rt(void)
++{
++	cpu_set_t saved;
++	int cpus[2], count = 0, cpu;
++
++	if (!ASSERT_OK(sched_getaffinity(0, sizeof(saved), &saved), "get_affinity"))
++		return;
++	for (cpu = 0; cpu < CPU_SETSIZE && count < 2; cpu++) {
++		if (CPU_ISSET(cpu, &saved))
++			cpus[count++] = cpu;
++	}
++	if (count < 2) {
++		test__skip();
++		return;
++	}
++	if (test__start_subtest("preemptible_control"))
++		run_cancel_case(cpus[0], cpus[1], false);
++	if (test__start_subtest("preempt_disabled"))
++		run_cancel_case(cpus[0], cpus[1], true);
++	ASSERT_OK(sched_setaffinity(0, sizeof(saved), &saved), "restore_affinity");
++}

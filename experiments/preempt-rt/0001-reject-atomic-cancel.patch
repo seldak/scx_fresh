@@ -1,0 +1,16 @@
+diff --git a/kernel/bpf/helpers.c b/kernel/bpf/helpers.c
+index b3cc5c8fc..af6153099 100644
+--- a/kernel/bpf/helpers.c
++++ b/kernel/bpf/helpers.c
+@@ -1570,6 +1570,11 @@ BPF_CALL_1(bpf_timer_cancel, struct bpf_async_kern *, async)
+ 
+ 	if (defer_timer_wq_op())
+ 		return -EOPNOTSUPP;
++	/* On RT, waiting for a running soft timer takes a sleeping lock.
++	 * Reject atomic callers before dropping the callback reference.
++	 */
++	if (IS_ENABLED(CONFIG_PREEMPT_RT) && in_atomic())
++		return -EOPNOTSUPP;
+ 
+ 	t = READ_ONCE(async->timer);
+ 	if (!t)

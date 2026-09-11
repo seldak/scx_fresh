@@ -15,6 +15,18 @@ can preempt a running eligible Deadline worker on wakeup; Urgent and Background
 workers are excluded from this comparison. See the kernel requirements and
 validation limits in [scheduler rules](docs/SCHEDULER.md).
 
+## Evaluation status
+
+The application evaluation found no demonstrated reason to prefer this policy
+over FIFO for freshness in its overloaded dependent graph. In a separate fixed
+task set, Deadline service matched Linux `SCHED_DEADLINE` with zero misses while
+both tested FIFO orders missed deadlines. These are workload-specific results,
+not a verdict on sched_ext. Further feature development is paused.
+
+The [PREEMPT_RT experiment](experiments/preempt-rt/README.md) preserves the local
+kernel patches, cancellation test and timer-rearm findings. It is experimental,
+not supported RT kernel enablement.
+
 ## Build and test
 
 Requires Linux with sched_ext support, readable kernel BTF, clang with a BPF

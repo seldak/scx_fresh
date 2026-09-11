@@ -1,0 +1,15 @@
+diff --git a/kernel/bpf/verifier.c b/kernel/bpf/verifier.c
+index 9e79750e2..1bc376e12 100644
+--- a/kernel/bpf/verifier.c
++++ b/kernel/bpf/verifier.c
+@@ -7599,10 +7599,6 @@ static int check_map_field_pointer(struct bpf_verifier_env *env, struct bpf_reg_
+ static int process_timer_func(struct bpf_verifier_env *env, struct bpf_reg_state *reg, argno_t argno,
+ 			      struct bpf_map_desc *map)
+ {
+-	if (IS_ENABLED(CONFIG_PREEMPT_RT)) {
+-		verbose(env, "bpf_timer cannot be used for PREEMPT_RT.\n");
+-		return -EOPNOTSUPP;
+-	}
+ 	return check_map_field_pointer(env, reg, argno, BPF_TIMER, map);
+ }
+ 
