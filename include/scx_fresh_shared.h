@@ -33,11 +33,13 @@ enum fresh_service_class : uint32_t {
 
 /* Stage identity is application-defined and diagnostic only. */
 #define FRESH_STAGE_UNSPECIFIED ((uint32_t)~0U)
+#define FRESH_API_VERSION 1U
 
 struct fresh_task_hint {
     uint32_t stage_id;         /* application-defined diagnostic identity */
     uint32_t class_id;         /* enum fresh_service_class */
     uint32_t flags;            /* reserved; publish zero */
+    uint32_t api_version;      /* wire ABI; freshqos fills FRESH_API_VERSION */
 
     uint64_t job_id;           /* monotonic per stage/thread */
     uint64_t release_ts_ns;    /* when job became ready (CLOCK_MONOTONIC) */

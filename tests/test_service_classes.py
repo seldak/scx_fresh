@@ -26,13 +26,18 @@ class ServiceClasses(unittest.TestCase):
         program = r'''
 #include <assert.h>
 #include <errno.h>
+#include <stddef.h>
 #include <bpf/bpf.h>
 #include "freshqos.h"
 static unsigned writes;
 int bpf_map_update_elem(int fd, const void *key, const void *value, __u64 flags) {
-    (void)fd; (void)key; (void)value; (void)flags; writes++; return 0;
+    assert(((const struct fresh_task_hint *)value)->api_version == FRESH_API_VERSION);
+    (void)fd; (void)key; (void)flags; writes++; return 0;
 }
 int main(void) {
+    _Static_assert(sizeof(struct fresh_task_hint) == 72, "hint wire size");
+    _Static_assert(offsetof(struct fresh_task_hint, api_version) == 12, "version offset");
+    _Static_assert(offsetof(struct fresh_task_hint, job_id) == 16, "job offset");
     struct freshqos q = {.map_fd=42};
     struct fresh_task_hint h = {.class_id=99};
     assert(freshqos_publish_hint(&q, &h)==-EINVAL);
@@ -55,6 +60,8 @@ int main(void) {
         assert(freshqos_publish_hint_for(&q, 123, &h)==0);
     }
     assert(writes==6);
+    assert(h.api_version==0); /* Publication must not mutate the caller. */
+    assert(freshqos_clear_hint(&q)==0);
 }
 '''
         with tempfile.TemporaryDirectory() as directory:
@@ -129,6 +136,7 @@ int main(void) {
     for (unsigned i=0; i<sizeof(stages)/sizeof(stages[0]); i++) {
         state = (struct task_state){.last_job_id=7};
         hint = (struct fresh_task_hint){
+            .api_version=FRESH_API_VERSION,
             .stage_id=stages[i], .job_id=7, .release_ts_ns=now-1000,
             .deadline_ts_ns=now+5000, .stale_ns=10000};
         hint.class_id=FRESH_CLASS_URGENT;
@@ -177,6 +185,11 @@ int main(void) {
         run(0, DSQ_DEADLINE, false);
         assert(!state.overrun && state.exec_ns_in_job==0);
         hint.class_id=999;
+        run(SCX_ENQ_WAKEUP, DSQ_BACKGROUND, false);
+        hint.class_id=FRESH_CLASS_URGENT;
+        hint.api_version=0;
+        run(SCX_ENQ_WAKEUP, DSQ_BACKGROUND, false);
+        hint.api_version=FRESH_API_VERSION+1;
         run(SCX_ENQ_WAKEUP, DSQ_BACKGROUND, false);
     }
     present=false;

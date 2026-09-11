@@ -105,8 +105,11 @@ Explicitly past deadlines remain valid. An overflowing relative bound is ignored
 when an absolute deadline is supplied. Urgent and Background need no deadline.
 Direct map writes violating this rule receive unhinted Background service and
 emit `INVALID_DEADLINE` on enqueue (subject to ring-buffer capacity).
-The interface is under development and has no ABI version or compatibility
-negotiation. Rebuild clients and scheduler together using matching headers.
+The hint ABI is version 1 (`FRESH_API_VERSION`). The client library stamps
+`api_version` on a copy when publishing, including clear operations; it does
+not modify the caller's hint. Direct map writers must set the field themselves.
+Missing or unsupported versions receive unhinted Background service. There is
+no version negotiation; rebuild older clients with the version 1 headers and library.
 Unknown classes are treated as unhinted Background work; stage zero has no special
 meaning. The client rejects unknown classes before
 updating the map. See the [scheduler rules](SCHEDULER.md) for service treatment.

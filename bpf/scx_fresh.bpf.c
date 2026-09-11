@@ -417,7 +417,7 @@ static __always_inline struct task_state *get_state(u64 key)
 static __always_inline struct fresh_task_hint *get_hint(u64 key)
 {
     struct fresh_task_hint *h = bpf_map_lookup_elem(&task_hints, &key);
-    if (!h || h->class_id > FRESH_CLASS_URGENT ||
+    if (!h || h->api_version != FRESH_API_VERSION || h->class_id > FRESH_CLASS_URGENT ||
         (h->class_id == FRESH_CLASS_DEADLINE && !fresh_hint_has_deadline(h)))
         return NULL;
     return h;

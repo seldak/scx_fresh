@@ -149,6 +149,7 @@ static void reset(void) {
     servers[0].protect_next=servers[1].protect_next=true;
     for (unsigned i=0; i<4; i++) {
         hints[i].deadline_ts_ns=1000000;
+        hints[i].api_version=FRESH_API_VERSION;
         hints[i].class_id=FRESH_CLASS_BACKGROUND;
         hints[i].job_id=1;
     }

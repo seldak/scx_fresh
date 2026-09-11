@@ -52,7 +52,9 @@ int freshqos_publish_hint(struct freshqos *q, const struct fresh_task_hint *hint
         return -EINVAL;
 
     uint64_t key = freshqos_pid_tgid_self();
-    int err = bpf_map_update_elem(q->map_fd, &key, hint, BPF_ANY);
+    struct fresh_task_hint wire = *hint;
+    wire.api_version = FRESH_API_VERSION;
+    int err = bpf_map_update_elem(q->map_fd, &key, &wire, BPF_ANY);
     if (err) {
         fprintf(stderr, "freshqos_publish_hint: update failed: %s\n", strerror(errno));
         return -errno;
@@ -68,7 +70,9 @@ int freshqos_publish_hint_for(struct freshqos *q, uint64_t pid_tgid, const struc
         return -EINVAL;
 
     uint64_t key = pid_tgid;
-    int err = bpf_map_update_elem(q->map_fd, &key, hint, BPF_ANY);
+    struct fresh_task_hint wire = *hint;
+    wire.api_version = FRESH_API_VERSION;
+    int err = bpf_map_update_elem(q->map_fd, &key, &wire, BPF_ANY);
     if (err) {
         fprintf(stderr, "freshqos_publish_hint_for: update failed: %s\n", strerror(errno));
         return -errno;

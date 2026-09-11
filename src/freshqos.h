@@ -21,10 +21,10 @@ int freshqos_open(struct freshqos *q, const char *pin_dir);
 /* Close map fds. */
 void freshqos_close(struct freshqos *q);
 
-/* Publish/overwrite the hint for the current thread (pid/tgid key). */
+/* Publish/overwrite with FRESH_API_VERSION, leaving the caller's hint unchanged. */
 int freshqos_publish_hint(struct freshqos *q, const struct fresh_task_hint *hint);
 
-/* Publish/overwrite the hint for an explicit pid/tgid key (used for producer-driven hinting). */
+/* Publish for an explicit worker, stamping FRESH_API_VERSION on the wire copy. */
 int freshqos_publish_hint_for(struct freshqos *q, uint64_t pid_tgid, const struct fresh_task_hint *hint);
 
 /* Clear current thread's hint (sets to BE/MISC with job_id=0). */
