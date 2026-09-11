@@ -222,6 +222,8 @@ struct {
 struct background_timer {
     struct bpf_timer timer;
     u64 deadline_ns;
+    u64 armed_ns;
+    bool pending;
     bool active;
 };
 
@@ -234,12 +236,15 @@ struct {
 
 static int background_timer_expired(void *map, u32 *cpu, struct background_timer *t)
 {
+    t->pending = false;
     if (!t->active)
         return 0;
     /* running may have replaced the slice while an old expiry was pending.
      * CPU pinning serializes this callback with that CPU's scheduling hooks.
      */
     if (scx_now_ns() < t->deadline_ns) {
+        t->armed_ns = t->deadline_ns;
+        t->pending = true;
         int err = bpf_timer_start(&t->timer, t->deadline_ns,
                                   BPF_F_TIMER_ABS | BPF_F_TIMER_CPU_PIN);
         if (err) {
@@ -287,6 +292,14 @@ static __always_inline void arm_background_timer(struct task_struct *p, bool urg
     if (urgent)
         return;
     t->deadline_ns = scx_now_ns() + (p->scx.slice ? p->scx.slice : 1);
+    /* Reusing an earlier expiry avoids waking RT irq_work on every resume.
+     * The callback checks the latest deadline before kicking. A shorter
+     * slice still needs an earlier timer and must not wait for the old one.
+     */
+    if (t->pending && t->armed_ns <= t->deadline_ns)
+        return;
+    t->armed_ns = t->deadline_ns;
+    t->pending = true;
     int err = bpf_timer_start(&t->timer, t->deadline_ns,
                               BPF_F_TIMER_ABS | BPF_F_TIMER_CPU_PIN);
     if (err) {

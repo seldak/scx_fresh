@@ -292,6 +292,7 @@ CASES = {
         arm_background_timer(&p, false);
         assert(timers[0].active && timers[0].timer.expires==1020);
         now=1010; p.scx.slice=30; arm_background_timer(&p, false);
+        assert(timers[0].timer.expires==1020); // Reuse the outstanding expiry.
         now=1020; background_timer_expired(NULL, &cpu, &timers[0]);
         assert(!kicks && timers[0].timer.expires==1040);
         arm_background_timer(&p, true);
@@ -305,6 +306,19 @@ CASES = {
         assert(kicks==1 && !timers[0].active);
         background_period_ns=0; arm_background_timer(&p, false);
         assert(!timers[0].active);
+    ''',
+    "timer_resume_coalesces_but_shorter_slice_rearms": r'''
+        reset(); struct task_struct p={.scx.slice=20};
+        arm_background_timer(&p, false);
+        for (unsigned i=0; i<10; i++) {
+            disarm_background_timer(&p);
+            now++;
+            arm_background_timer(&p, false);
+            assert(timers[0].timer.expires==1020);
+        }
+        p.scx.slice=5;
+        arm_background_timer(&p, false);
+        assert(timers[0].timer.expires==1015);
     ''',
     "continuous_queue_lifecycle": r'''
         for (unsigned tickless=0; tickless<2; tickless++) {
