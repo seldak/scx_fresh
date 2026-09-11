@@ -7,31 +7,17 @@ Applications select Urgent, Deadline or Background service explicitly. Stage
 identity is diagnostic and never selects a queue. The hint ABI is version 1;
 use matching client headers and library. Unsupported versions receive Background service.
 
-Expiry and cancellation belong to the application; elapsed time bounds never
-demote a worker. An optional per-CPU Background server shares an allocation
-between native Background and budget-demoted Deadline workers. It remains
-subordinate to Urgent and is disabled by default. An earlier effective deadline
-can preempt a running eligible Deadline worker on wakeup; Urgent and Background
-workers are excluded from this comparison. See the kernel requirements and
-validation limits in [scheduler rules](docs/SCHEDULER.md).
-
-## Evaluation status
-
-The application evaluation found no demonstrated reason to prefer this policy
-over FIFO for freshness in its overloaded dependent graph. In a separate fixed
-task set, Deadline service matched Linux `SCHED_DEADLINE` with zero misses while
-both tested FIFO orders missed deadlines. These are workload-specific results,
-not a verdict on sched_ext. Further feature development is paused.
-
-The [PREEMPT_RT experiment](experiments/preempt-rt/README.md) preserves the local
-kernel patches, cancellation test and timer-rearm findings. It is experimental,
-not supported RT kernel enablement.
+The application selects work and publishes one hint per worker before waking
+it. The scheduler supplies CPU service; it does not own the work queue, decide
+whether work is useful, or cancel jobs. A per-job budget can demote Deadline
+work to Background. The optional Background server allocates service ahead of
+Deadline while remaining subordinate to Urgent.
 
 ## Build and test
 
 Requires Linux with sched_ext support, readable kernel BTF, clang with a BPF
 backend, bpftool, a C compiler, and libbpf, libelf, and zlib development files.
-Python 3 runs the tests. ROS is not required.
+Python 3 runs the tests.
 
 ```bash
 make
@@ -47,10 +33,11 @@ The build produces the `scx_fresh` loader and an MIT-licensed `libfreshqos.a`
 client library. Applications use `src/freshqos.h` and the headers in `include/`;
 linking the client requires libbpf. The client does not embed the BPF program.
 
-The application selects work and publishes one hint per worker before waking
-it. The scheduler consumes that metadata; it does not own an application queue.
 See the [architecture](docs/DESIGN.md), [hint contract](docs/HINTS_API.md),
 [current policy](docs/SCHEDULER.md), and [operation guide](docs/USAGE.md).
+
+The [PREEMPT_RT experiment](experiments/preempt-rt/README.md) contains local
+kernel patches and their validation limits; it is not supported RT enablement.
 
 ## License
 

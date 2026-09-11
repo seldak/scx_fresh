@@ -3,7 +3,8 @@
 Service is selected explicitly by class. Stage IDs identify application work
 for diagnostics and do not affect routing.
 Userspace owns job selection;
-the scheduler routes the thread named by its hint.
+the scheduler routes the thread named by its hint. Missing or unsupported hint
+ABI versions receive unhinted Background service; see the [ABI contract](HINTS_API.md).
 
 ## Routing at enqueue
 
@@ -38,20 +39,6 @@ trigger this request. This uses `scx_bpf_cpu_curr` under RCU; kernels without
 that helper retain dispatch-only Deadline ordering. A remote CPU can change
 owners between inspection and the kick, so the kick is a scheduling request,
 not an atomic promise to displace a particular worker.
-
-The focused loaded probe passed three trials: an earlier-deadline worker woke
-3 ms into a 20 ms Deadline callback and started after 69, 74 and 68 microseconds,
-before that callback completed. The server and BE cap were disabled. The loaded
-Background-server regression also passes.
-
-Application regression checks passed one 15-second measured run each with zero
-and two Background hogs, using a 2 ms BE cap and a 2 ms / 10 ms Background
-server. Both used source epoch `1403636579758555500` in the EuRoC synthetic
-workload: all 3000 Urgent callbacks and all 300 callbacks per downstream stage
-completed, with zero late callbacks, drops or unfinished work. With two hogs,
-Urgent p99 start age was 1.72 ms, estimator p99 completion age was 15.77 ms,
-and the hogs completed 11,936 iterations combined. These single runs showed no
-application regression; they do not establish a latency improvement.
 
 ## Optional Background server
 
@@ -89,8 +76,11 @@ Non-Urgent slices are also bounded by time to the next replenishment, so a long
 Deadline slice does not deliberately span it. A per-CPU monotonic BPF timer
 requests rescheduling at that bound; writing a slice alone does not guarantee
 a scheduling event when the local scheduler tick is stopped. Retaining the
-current worker rearms its timer without requiring a context switch. Stopping
-disarms it, and Urgent execution never arms it. The timer does not select work
+current worker updates its timer deadline without requiring a context switch.
+An outstanding earlier expiry is reused; a shorter deadline rearms the timer.
+The callback checks the latest deadline before requesting rescheduling. Stopping
+marks the timer inactive without synchronous cancellation, and Urgent execution
+never arms it. The timer does not select work
 or charge CPU; dispatch still applies the same class and server rules.
 Timer delivery and scheduling boundaries can occur late. Allocation
 saturates at zero, but excess service ahead of waiting Deadline work becomes
@@ -127,8 +117,7 @@ its effective deadline with the first CPU-eligible queued Deadline job; the
 earlier job wins and equal keys yield to the queued peer. Queued Urgent work
 is considered before a previous Urgent worker. Both classes precede lower
 service, except for funded Background allocation. A budget-exhausted previous Deadline worker yields so stopping
-and enqueue can enforce demotion. This also corrects the disabled policy's
-former rotation into Background when its only Deadline worker was current.
+and enqueue can enforce demotion.
 For Background, the current worker competes against the first ordered DSQ
 entry using actual Background virtual time; being queued does not itself
 give a worker precedence over a less-served current worker. Equal keys yield

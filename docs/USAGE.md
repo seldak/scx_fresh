@@ -2,7 +2,7 @@
 
 Run from the scheduler repository root. Requires a sched_ext-capable Linux
 kernel, readable kernel BTF, clang with BPF support, bpftool, a C compiler,
-libbpf/libelf/zlib development files, and Python 3 for tests. ROS is not needed.
+libbpf/libelf/zlib development files, and Python 3 for tests.
 
 ```bash
 make
@@ -67,7 +67,6 @@ It allows two periods plus two observation chunks for allocation and balance,
 and five periods for a Background gap. These finite-window tolerances do not
 establish a hard reservation or a latency guarantee; inspect the reported CPU
 shares and raw observation gaps.
-Bag regressions with the server omitted remain a separate disabled-policy gate.
 The loader also prints `background_server_lifetime` counters for CPUs that
 served Background. These include warmup and shutdown time and must not be
 compared directly with the workload's three-second window totals. They expose
@@ -104,15 +103,7 @@ job. Equal deadlines have no asserted FIFO completion order. The budgeted
 worker requests a 1 ms slice so its 6 ms job exercises re-enqueue demotion.
 No scheduler policy changes are made by this test.
 
-Loaded validation passed all three rounds in both cells on the isolated test
-CPU. Deadline-only earlier arrivals started within 68–84 microseconds; mixed-cell
-Urgent arrivals started within 60–63 microseconds. Every worker completed its
-requested CPU work, native Background started before the Deadline owner finished,
-and the budgeted worker emitted a demotion for each of its three jobs. Equal-deadline
-completion order varied, as permitted. These finite tests do not establish a
-schedulability guarantee or a bound on worst-case response time.
-
-## Build configuration
+## Deadline preemption probe
 
 The focused Deadline preemption probe uses a 20ms Deadline callback and wakes
 an earlier-deadline worker after 3ms. Three repetitions must show an overlapping
@@ -130,9 +121,14 @@ select build tools and flags. Make does not track changes to command-line flags;
 clean the selected build directory before changing them.
 
 `FRESH_FULL_SWITCH=1` enables full-switch mode. It is outside the established
-partial-switch evaluation configuration. Clean and rebuild when returning to
-the default. Do not add `isolcpus=domain` for the previously tested kernel
-7.0.0-31-generic: scheduler attachment was rejected with that setting.
+partial-switch configuration. Clean and rebuild when returning to the default.
+CPU-isolation options must be checked for compatibility with the target kernel.
 
 The loader embeds its BPF object. Rebuild it after BPF changes. CPU placement,
 interrupt placement, and workload admission remain deployment responsibilities.
+
+## PREEMPT_RT
+
+Do not assume BPF timer support from sched_ext availability alone. The optional
+Background server requires BPF timers. See the [RT experiment](../experiments/preempt-rt/README.md)
+for the tested kernel restriction, local patches and incomplete validation.

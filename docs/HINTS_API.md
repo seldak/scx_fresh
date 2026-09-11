@@ -33,6 +33,7 @@ request for exemption from a kernel expiry rule.
 | `stage_id` | Application-defined diagnostic identity; never selects service. |
 | `class_id` | `FRESH_CLASS_BACKGROUND`, `FRESH_CLASS_DEADLINE` or `FRESH_CLASS_URGENT`. |
 | `flags` | Reserved; publish zero. |
+| `api_version` | Wire ABI version 1; the client library stamps it on publication. |
 | `job_id` | Stable for one job; change it when selecting new work. |
 | `release_ts_ns` | Monotonic release time. |
 | `deadline_ts_ns` | Absolute monotonic deadline, or zero for none. |
@@ -82,7 +83,7 @@ The application decides whether a selected job is useful, including after its
 deadline. It may reject work before callback entry or let late work finish.
 BPF does not change class because a time bound elapsed, and no ownership flag
 is needed to retain service through a late completion tail. Budget demotion
-still applies and can delay progress; this change is not a service reservation.
+still applies and can delay progress; retaining a hint is not a service reservation.
 
 A completed hint may remain through parking until the dispatcher establishes
 completion and replaces it with the next job. Clearing the slot into Background
@@ -114,5 +115,5 @@ Unknown classes are treated as unhinted Background work; stage zero has no speci
 meaning. The client rejects unknown classes before
 updating the map. See the [scheduler rules](SCHEDULER.md) for service treatment.
 
-Application-specific message lifetimes, sensor timestamps, and queue admission
+Application-specific resource lifetimes, source timestamps, and queue admission
 belong in the consuming application's documentation.

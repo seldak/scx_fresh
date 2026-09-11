@@ -6,8 +6,7 @@ application processing.
 
 ## Responsibility boundary
 
-The following contract guides the generic scheduler design. The current
-implementation and remaining policy gaps are described below.
+Responsibilities are divided as follows.
 
 | Owner | Decisions |
 | --- | --- |
@@ -18,21 +17,19 @@ implementation and remaining policy gaps are described below.
 The runtime owns the work graph and work selection; the scheduler owns CPU
 scheduling. A deadline miss does not authorize the scheduler to cancel
 application work. Expiry and the decision to continue late work belong to the
-application. Sensor or stage identity must not select service.
+application. Stage identity must not select service.
 
 A runtime may supply a job deadline directly. Graph analysis and remaining-chain
 estimates are optional ways to derive it, not requirements of the hint interface.
 Dropping queued work does not imply permission to interrupt a running callback;
 the runtime remains responsible for its message, resource and completion lifetimes.
 
-## Service model and remaining gaps
+## Service model
 
 A service class describes configured CPU treatment, independent of application
 function. It is a policy inside SCHED_EXT, not another Linux scheduling class.
-Class precedence expresses the architect's priorities. Within a deadline-ordered
-class, an earlier-deadline job should preempt a later-deadline job when they
-compete for the same CPU. Hints must not bypass configured class permissions or
-resource limits. Deadline wakeups now request preemption when their explicit
+Class precedence expresses the architect's priorities. Deadline wakeups request
+preemption when their explicit
 effective deadline is earlier than the running eligible Deadline job's, or when
 the current worker is receiving unprotected Background service. Dispatch also
 compares the current Deadline worker against queued Deadline work.
@@ -90,28 +87,12 @@ are fixed policy choices; the optional Background allocation is shared per CPU.
 Map write permissions
 control who may publish hints; per-worker class authorization is not implemented.
 
-| Current mechanism | Difference from the intended contract |
-| --- | --- |
-| Urgent class selects the dedicated queue and wakeup preemption | Implemented independently of stage identity. |
-| Deadline effective-deadline ordering and same-class wakeup preemption | Three focused loaded trials and one application regression run each with zero and two Background hogs passed. |
-| Application-owned expiry, with no age demotion | Implemented for every class without an ownership flag. |
-| Job-budget overrun demotes Deadline to Background; Urgent routing is exempt | Server service does not refill job budgets or restore Deadline standing. |
-| Optional per-CPU Background server | Supplies precedence over Deadline while funded; delivery depends on interference and scheduling granularity. |
-
-Generic class selection and application-owned expiry are implemented. Per-worker
-class permissions remain future work. The optional
-Background server has passed the focused loaded allocation and progress probe;
-those finite-window checks do not establish a hard reservation.
-The hint and scheduler references describe the current ABI and routing rules.
-
 ## Limits
 
 With the server disabled, strict priority can starve Background. Budget demotion does not cancel work,
 but can delay the completion path. Removing age demotion does not establish
 minimum service or a hard real-time guarantee. The scheduler does not control
-GPU/ISP execution, synchronize measurements, or migrate an application job
+accelerator execution, synchronize external clocks, or migrate an application job
 between workers. Kernel fallback on scheduler failure is not a timing guarantee.
 
-See [usage](USAGE.md) for build, attachment, and non-attaching tests. The
-application integration and evaluation remain in
-[scx-slam-fresh](https://github.com/seldak/scx-slam-fresh).
+See [usage](USAGE.md) for build, attachment and tests.
